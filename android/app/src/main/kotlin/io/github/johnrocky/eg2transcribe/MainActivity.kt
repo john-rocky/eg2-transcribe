@@ -42,20 +42,24 @@ import org.json.JSONObject
  * permission.
  *
  * Files (the app's external files dir, `files/` below):
- *   files/eg2_audio_fp32.tflite   the encoder (README.md: how to make it, and how to push it); any other .tflite there
- *                                 can be picked under Model
+ *   files/eg2_audio_f16safe_fp16w_w30.tflite, _w10.tflite
+ *                                 the encoder, one file per window length (README.md: how to make them, how to push
+ *                                 them); other .tflite files there can be picked under Model
  *   files/reader/                 a trained reader: reader.tflite, word_table.npy or .bin, vocab.txt (README.md)
  *   files/<report>                with --es report: the run report (JSON)
+ * and in the app's internal cache: npu_jit/ (the NPU's compiled graphs, about 0.6 GB per model file) and npu_models/
+ * (links to the model files named with their SHA-256).
  *
  * Launch extras (the device check, README.md "How the device check works"): --es file <path or name under files/>
  * transcribes that file, --ei mic_ms <ms> records that long from the microphone and transcribes it; with either,
  * --es report <name.json> writes the run report and --ez dump true also the per-token files. Settings: --es backend
- * cpu|gpu_fp32|gpu_default|npu, --es model <file>, --ei window_s 30|10, --ei overlap <tokens>, --ef min_rms <rms>.
+ * cpu|gpu_fp32|gpu_default|npu, --es model <file> (either file of a _w30 / _w10 pair), --ei window_s 30|10 (the NPU
+ * always runs 10 s windows), --ei overlap <tokens>, --ef min_rms <rms>.
  * A start with file or mic_ms shows over the lock screen and keeps the display on (a phone asleep behind a lock keeps
  * the app on its slow cores).
  *
- * Log tag eg2transcribe: ENGINE_READY, DELEGATE, FALLBACK, READER, INPUT, WINDOW, RESULT, RUN_JSON, RUN_DONE, BUSY,
- * MIC_PERMISSION, ROTATION, ERROR.
+ * Log tag eg2transcribe: STEP, NPU_CACHE, ENGINE_READY, DELEGATE, FALLBACK, READER, INPUT, WINDOW, RESULT, RUN_JSON,
+ * RUN_DONE, BUSY, MIC_PERMISSION, ROTATION, ERROR.
  */
 class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
@@ -133,7 +137,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         // Back from pushing the model with adb: load it if it is there now.
-        if (Session.pill == "MODEL MISSING" && pending.get() == 0 && Jobs.modelFile(this).isFile) submit { Jobs.loadModel(applicationContext) }
+        if (Session.pill == "MODEL MISSING" && pending.get() == 0 && !Jobs.modelChoice(this).missing) submit { Jobs.loadModel(applicationContext) }
     }
 
     override fun onDestroy() {
@@ -377,8 +381,10 @@ class MainActivity : Activity() {
     }
 
     private fun onModelChange() {
-        val names = Engine.filesDir(this).listFiles { f -> f.isFile && f.name.endsWith(".tflite") }?.map { it.name }?.sorted() ?: emptyList()
-        val items = names.map { n -> if (n == Session.modelName) "$n (in use)" else n } + "Choose a file on this phone…"
+        val dir = Engine.filesDir(this)
+        val names = ModelChoice.all(dir)
+        val current = ModelChoice.nameOf(Session.modelName)
+        val items = names.map { n -> ModelChoice.of(dir, n).describe() + if (ModelChoice.nameOf(n) == current) " (in use)" else "" } + "Choose a file on this phone…"
         AlertDialog.Builder(this).setTitle("Encoder file").setItems(items.toTypedArray()) { _, which ->
             if (which == names.size) onChooseModelFile() else {
                 Session.modelName = names[which]
@@ -391,17 +397,24 @@ class MainActivity : Activity() {
     private class WindowChoice(val frames: Int, val overlap: Int, val label: String)
 
     private fun onWindowChange() {
-        val choices = listOf(
+        val have = Jobs.modelChoice(this).windows
+        val all = listOf(
             WindowChoice(WindowPlan.FRAMES_30S, 96, "30 s windows, 96-token overlap (3.84 s) — default"),
             WindowChoice(WindowPlan.FRAMES_30S, 128, "30 s windows, 128-token overlap (5.12 s)"),
             WindowChoice(WindowPlan.FRAMES_30S, 0, "30 s windows, no overlap (the start of each window is damaged)"),
             WindowChoice(WindowPlan.FRAMES_10S, 96, "10 s windows, 96-token overlap"),
             WindowChoice(WindowPlan.FRAMES_10S, 0, "10 s windows, no overlap"),
         )
-        AlertDialog.Builder(this).setTitle("Windows").setItems(choices.map { it.label }.toTypedArray()) { _, which ->
+        // The NPU runs the 10 s file only; a model offers the lengths it has a file for.
+        val choices = all.filter { (Session.backend != Backend.NPU || it.frames == WindowPlan.FRAMES_10S) && (have.isEmpty() || it.frames in have) }
+        val title = if (Session.backend == Backend.NPU) "Windows (the NPU runs 10 s windows)" else "Windows"
+        AlertDialog.Builder(this).setTitle(title).setItems(choices.map { it.label }.toTypedArray()) { _, which ->
+            val changed = choices[which].frames != Session.windowFrames
             Session.windowFrames = choices[which].frames
             Session.overlapTokens = choices[which].overlap
             render()
+            // Another window length is another file of the pair: compile it now (the NPU keeps its 10 s file).
+            if (changed && Session.backend != Backend.NPU && !isBusy) submit { Jobs.loadModel(applicationContext) }
         }.setNegativeButton("Cancel", null).show()
     }
 
@@ -529,6 +542,18 @@ class MainActivity : Activity() {
         return scroll
     }
 
+    private var tickPending = false
+
+    /** While a model loads: render once a second so the elapsed time moves (an NPU compile takes minutes). */
+    private fun scheduleTick() {
+        if (tickPending) return
+        tickPending = true
+        main.postDelayed({
+            tickPending = false
+            if (!isDestroyed && Session.loading) render()
+        }, 1000)
+    }
+
     private fun scheduleRender() {
         synchronized(this) {
             if (renderPending) return
@@ -553,12 +578,16 @@ class MainActivity : Activity() {
                 Session.Tone.WARN -> C_WARN
             })
         }
-        status.text = Session.status
+        val since = Session.loadingSince
+        status.text = if (Session.loading && since > 0L) "${Session.status} ${Session.clock((System.nanoTime() - since) / 1e9)}" else Session.status
+        if (Session.loading && since > 0L) scheduleTick()
         status.setTextColor(if (Session.statusOpensSettings) C_ACCENT else C_TEXT)
         modelValue.text = Session.modelLine.ifEmpty { Session.modelName }
         readerValue.text = Session.readerLine.ifEmpty { "…" }
         readerValue.setTextColor(if (Session.readerIsStub) C_WARN else C_TEXT)
-        windowValue.text = "${Session.windowFrames / 100} s, overlap ${Session.overlapTokens} tokens (${String.format(Locale.US, "%.2f", Session.overlapTokens * 0.04)} s)"
+        val windowS = Session.effectiveWindowFrames() / 100
+        windowValue.text = "$windowS s, overlap ${Session.overlapTokens} tokens (${String.format(Locale.US, "%.2f", Session.overlapTokens * 0.04)} s)" +
+            if (Session.backend == Backend.NPU || Engine.loaded?.encoder?.backend == Backend.NPU) " · the NPU runs 10 s windows" else ""
         engineLine.text = Session.engineLine
         engineLine.visibility = if (Session.engineLine.isEmpty()) View.GONE else View.VISIBLE
         fallbackLine.text = Session.fallbackLine ?: ""

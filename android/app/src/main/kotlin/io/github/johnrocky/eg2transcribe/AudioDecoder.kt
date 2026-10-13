@@ -21,7 +21,13 @@ import kotlin.math.roundToInt
  * bit (FLAC is lossless, so its samples are the ones soundfile reads on a computer).
  */
 object AudioDecoder {
-    class Decoded(val samples: Long, val sourceRate: Int, val channels: Int, val format: String, val resampled: Boolean, val ms: Double)
+    /**
+     * [expectedSamples]: the length the file declares (WAV: its data size; others: the track duration), at 16 kHz, or
+     * null when it declares none. A decoder that returns fewer samples shows up as the difference (the Galaxy S26's
+     * FLAC decoder returned the 54 min fixture 998 samples short in an earlier build: the file's last 3 FLAC frames,
+     * which are 402 + 402 + 194 samples long).
+     */
+    class Decoded(val samples: Long, val sourceRate: Int, val channels: Int, val format: String, val resampled: Boolean, val ms: Double, val expectedSamples: Long?)
 
     class DecodeException(text: String, cause: Throwable? = null) : Exception(text, cause)
 
@@ -31,7 +37,7 @@ object AudioDecoder {
         val n = context.contentResolver.openInputStream(uri)?.use { readFully(it, head) } ?: throw DecodeException("The file could not be opened.")
         val isWav = n == 12 && String(head, 0, 4, Charsets.US_ASCII) == "RIFF" && String(head, 8, 4, Charsets.US_ASCII) == "WAVE"
         val r = if (isWav) decodeWav(context, uri, out, cancel, progress) else decodeMedia(context, uri, out, cancel, progress)
-        return Decoded(r.samples, r.sourceRate, r.channels, r.format, r.resampled, (System.nanoTime() - t) / 1e6)
+        return Decoded(r.samples, r.sourceRate, r.channels, r.format, r.resampled, (System.nanoTime() - t) / 1e6, r.expectedSamples)
     }
 
     private fun readFully(s: InputStream, b: ByteArray): Int {
@@ -76,7 +82,10 @@ object AudioDecoder {
         }
     }
 
-    private class Result(val samples: Long, val sourceRate: Int, val channels: Int, val format: String, val resampled: Boolean)
+    private class Result(val samples: Long, val sourceRate: Int, val channels: Int, val format: String, val resampled: Boolean, val expectedSamples: Long?)
+
+    /** [n] samples at [rate] as samples at 16 kHz. */
+    private fun at16k(n: Long, rate: Int): Long = if (rate == MelFrontEnd.SAMPLE_RATE) n else Math.round(n.toDouble() * MelFrontEnd.SAMPLE_RATE / rate)
 
     private fun decodeWav(context: Context, uri: Uri, out: File, cancel: () -> Boolean, progress: (Double) -> Unit): Result {
         val input = context.contentResolver.openInputStream(uri)?.buffered(1 shl 16) ?: throw DecodeException("The file could not be opened.")
@@ -138,7 +147,7 @@ object AudioDecoder {
                             if (got < want) break
                         }
                         sink.close()
-                        return Result(sink.written, rate, channels, if (float) "wav float32" else "wav pcm$bits", sink.resampled)
+                        return Result(sink.written, rate, channels, if (float) "wav float32" else "wav pcm$bits", sink.resampled, at16k(total, rate))
                     }
                 } else {
                     s.skip(size + (size % 2))
@@ -251,7 +260,8 @@ object AudioDecoder {
                 val s = sink ?: throw DecodeException("The decoder gave no audio for this file.")
                 s.close()
                 progress(1.0)
-                return Result(s.written, rate, channels, mime, s.resampled)
+                val expected = if (durationUs > 0) Math.round(durationUs * MelFrontEnd.SAMPLE_RATE / 1e6) else null
+                return Result(s.written, rate, channels, mime, s.resampled, expected)
             } finally {
                 runCatching { sink?.close() }
                 runCatching { codec.stop() }

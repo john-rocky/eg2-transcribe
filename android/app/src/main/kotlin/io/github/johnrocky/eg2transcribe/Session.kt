@@ -39,6 +39,19 @@ object Session {
     @Volatile var lastInput: Input? = null
     @Volatile var recordMode = false
 
+    /** System.nanoTime() when the current model load started, 0 when none runs (the screen shows the time it takes). */
+    @Volatile var loadingSince = 0L
+
+    /** The window length a run uses: the loaded encoder's when it has no file for the setting (the NPU: 10 s), else the setting. */
+    fun effectiveWindowFrames(): Int {
+        val sizes = Engine.loaded?.encoder?.windowSizes
+        return when {
+            sizes != null -> if (windowFrames in sizes) windowFrames else sizes.max()
+            backend == Backend.NPU -> WindowPlan.FRAMES_10S
+            else -> windowFrames
+        }
+    }
+
     /** A decoded input kept for "Transcribe again": the PCM file and what it was. */
     class Input(val pcm: File, val label: String, val json: org.json.JSONObject)
 

@@ -21,29 +21,37 @@ object Jobs {
 
     private const val TAG = Engine.TAG
 
-    fun modelFile(context: Context): File = File(Engine.filesDir(context), Session.modelName)
+    fun modelChoice(context: Context): ModelChoice = ModelChoice.of(Engine.filesDir(context), Session.modelName)
 
     /** Loads the reader and the encoder for the current settings (work thread). True when the encoder is ready. */
     fun loadModel(context: Context): Boolean {
         val readers = Engine.ensureReader(context)
         Session.readerLine = readers.note
         Session.readerIsStub = readers.reader.isStub
-        val file = modelFile(context)
-        Session.modelLine = if (file.isFile) "${file.name} · ${mb(file.length())}" else "${file.name} · not on this phone"
-        if (Engine.loaded?.let { it.requested == Session.backend && it.encoder.file == file } == true) return true
+        val choice = modelChoice(context)
+        Session.modelLine = choice.describe()
+        if (Engine.isLoaded(choice, Session.backend, Session.windowFrames) != null) return true
         Session.loading = true
+        Session.loadingSince = System.nanoTime()
         Session.pill = "LOADING MODEL"
         Session.tone = Session.Tone.WORK
-        Session.status = "Compiling the encoder for ${Session.backend.label}" + (if (Session.backend == Backend.NPU) " (the first time on the NPU can take minutes)" else "") + "…"
+        Session.status = "Compiling the encoder for ${Session.backend.label}…"
         Session.fallbackLine = null
         Session.changed()
         try {
-            val l = Engine.ensureEncoder(context, file, Session.backend)
+            val l = Engine.ensureEncoder(context, choice, Session.backend, Session.windowFrames) { stage ->
+                Session.status = stage
+                Session.changed()
+            }
             val e = l.encoder
+            val npu = l.npu
             Session.engineLine = "Encoder on ${e.backend.label}" + (if (e.backend == Backend.CPU) " (${e.threads} threads)" else "") +
-                " · compiled in ${secs(e.compileMs)} · signatures ${e.signatureNames.joinToString(", ")}"
+                " · " + (if (e.backend == Backend.NPU && npu?.prepared?.cachedBefore == true) "loaded from its cache in ${secs(e.compileMs)}"
+                else "compiled in ${secs(e.compileMs)}" + (if (e.backend == Backend.NPU) " (first time; later starts read the cache)" else "")) +
+                " · ${e.file.name} (${e.signatureNames.joinToString(", ")})"
             Session.fallbackLine = l.fallback
-            Log.i(TAG, "ENGINE_READY requested=${l.requested.id} used=${e.backend.id} compile_ms=${fmt(e.compileMs)} warmup_ms=${e.warmupMs} model=${file.name} bytes=${file.length()} fallback=${l.fallback != null}")
+            Log.i(TAG, "ENGINE_READY requested=${l.requested.id} used=${e.backend.id} compile_ms=${fmt(e.compileMs)} warmup_ms=${e.warmupMs} model=${e.file.name} bytes=${e.file.length()} fallback=${l.fallback != null}" +
+                (npu?.let { " npu_dispatch=${it.dispatch} npu_cached_before=${it.prepared?.cachedBefore} npu_cache_bytes=${it.cacheBytesAfter} npu_error=${it.error}" } ?: ""))
             Session.pill = "READY"
             Session.tone = Session.Tone.IDLE
             Session.status = if (Session.lastInput == null) "Record, or open an audio file." else "Ready."
@@ -55,12 +63,8 @@ object Jobs {
             when (e.code) {
                 "model_missing" -> {
                     Session.pill = "MODEL MISSING"
-                    Session.status = "The encoder file is not on this phone yet (steps below)."
+                    Session.status = "The encoder files are not on this phone yet (steps below)."
                     Session.note = missingModelNote(context)
-                }
-                "npu_unavailable" -> {
-                    Session.pill = "NPU UNAVAILABLE"
-                    Session.status = e.text + " Pick CPU or GPU."
                 }
                 else -> {
                     Session.pill = "LOAD FAILED"
@@ -79,6 +83,7 @@ object Jobs {
             return false
         } finally {
             Session.loading = false
+            Session.loadingSince = 0L
             Session.changed()
         }
     }
@@ -86,11 +91,13 @@ object Jobs {
     @Volatile private var lastLoadError: EncoderException? = null
 
     fun missingModelNote(context: Context): String {
-        val dir = Engine.filesDir(context)
-        return "The encoder is a separate file (${Engine.DEFAULT_MODEL}, 1.18 GB; README.md says how to make it).\n\n" +
-            "Either push it with adb, then come back to this screen:\n" +
-            "adb push ${Engine.DEFAULT_MODEL} ${sdcard(dir)}/\n\n" +
-            "or tap Change next to Model and choose the file on this phone (it is copied into the app)."
+        val dir = sdcard(Engine.filesDir(context))
+        val base = ModelChoice.nameOf(Engine.DEFAULT_MODEL)
+        return "The encoder is two separate files, one per window length: ${base}_w30.tflite and ${base}_w10.tflite (589 MB each; " +
+            "README.md describes them). The NPU runs the 10 s file, the CPU and the GPU the 30 s file.\n\n" +
+            "Either push them with adb, then come back to this screen:\n" +
+            "adb push ${base}_w30.tflite $dir/\nadb push ${base}_w10.tflite $dir/\n\n" +
+            "or tap Change next to Model and choose a file on this phone (it is copied into the app; copy both files of a pair)."
     }
 
     /** /storage/emulated/0/... as adb's /sdcard/... */
@@ -123,8 +130,9 @@ object Jobs {
             "source" to "file", "label" to label, "samples" to decoded.samples, "seconds" to decoded.samples / 16000.0,
             "format" to decoded.format, "source_rate" to decoded.sourceRate, "channels" to decoded.channels,
             "resampled" to decoded.resampled, "decode_ms" to decoded.ms,
+            "expected_samples" to decoded.expectedSamples, "missing_samples" to decoded.expectedSamples?.let { it - decoded.samples },
         )
-        Log.i(TAG, "INPUT source=file label=$label samples=${decoded.samples} format=${decoded.format} rate=${decoded.sourceRate} channels=${decoded.channels} resampled=${decoded.resampled} decode_ms=${fmt(decoded.ms)}")
+        Log.i(TAG, "INPUT source=file label=$label samples=${decoded.samples} expected=${decoded.expectedSamples} format=${decoded.format} rate=${decoded.sourceRate} channels=${decoded.channels} resampled=${decoded.resampled} decode_ms=${fmt(decoded.ms)}")
         run(context, Session.Input(pcm, label, json), req)
     }
 
@@ -290,12 +298,26 @@ object Jobs {
             "app" to "eg2transcribe", "version" to BuildConfig.VERSION_NAME, "litert" to BuildConfig.LITERT_VERSION,
             "status" to status, "text" to text, "time" to OwnLog.now(),
             "device" to Engine.deviceJson(context), "input" to input,
-            "model" to jsonOf("file" to Session.modelName, "bytes" to modelFile(context).let { if (it.isFile) it.length() else null }),
+            "model" to modelChoice(context).let { c ->
+                jsonOf(
+                    "chosen" to Session.modelName, "name" to c.name, "file" to l?.encoder?.file?.name, "bytes" to l?.encoder?.file?.length(),
+                    "files" to jsonArray(c.files.map { jsonOf("name" to it.name, "bytes" to it.length()) }),
+                )
+            },
             "backend" to jsonOf(
                 "requested" to Session.backend.id, "used" to l?.encoder?.backend?.id, "fallback" to l?.fallback,
                 "compile_ms" to l?.encoder?.compileMs, "warmup_ms" to l?.encoder?.warmupMs?.let { JSONObject(it as Map<*, *>) },
                 "threads" to l?.encoder?.threads, "signatures" to l?.encoder?.signatureNames?.let { jsonArray(it) },
                 "npu_libraries_packaged" to LiteRt.npuPackaged,
+                "npu" to l?.npu?.let { n ->
+                    jsonOf(
+                        "hexagon" to Npu.hexagon(), "dispatch_delegate" to n.dispatch, "compile_ms" to n.compileMs, "error" to n.error,
+                        "sha256" to n.prepared?.sha256, "sha256_ms" to n.prepared?.sha256Ms, "compiled_path" to n.prepared?.path?.absolutePath,
+                        "cache_dir" to n.prepared?.cacheDir?.absolutePath, "cached_before" to n.prepared?.cachedBefore, "cache_bytes_after" to n.cacheBytesAfter,
+                        "cache_dirs_with_graph" to n.prepared?.let { p -> jsonArray(p.dirsWithGraph().map { it.absolutePath }) },
+                        "link_note" to n.prepared?.note, "key_lines" to jsonArray(n.keyLines),
+                    )
+                },
             ),
             "delegate_lines" to l?.delegateLines?.let { jsonArray(it) },
             "reader" to readers?.let { jsonOf("name" to it.reader.name, "stub" to it.reader.isStub, "dim" to it.reader.dim, "words" to it.table.size, "note" to it.note) },
@@ -319,6 +341,6 @@ object Jobs {
 
     fun fmt(x: Double) = String.format(Locale.US, "%.1f", x)
     fun secs(ms: Double) = String.format(Locale.US, if (ms < 10_000) "%.2f s" else "%.1f s", ms / 1000.0)
-    fun mb(bytes: Long) = if (bytes >= 1L shl 30) String.format(Locale.US, "%.2f GB", bytes / 1e9) else String.format(Locale.US, "%.0f MB", bytes / 1e6)
+    fun mb(bytes: Long) = megabytes(bytes)
     fun dbfs(rms: Double) = if (rms <= 0.0) "-inf dBFS" else String.format(Locale.US, "%.0f dBFS", 20 * Math.log10(rms))
 }

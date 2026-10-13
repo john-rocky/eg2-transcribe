@@ -21,7 +21,9 @@ import org.json.JSONObject
  */
 object Engine {
     const val TAG = "eg2transcribe"
-    const val DEFAULT_MODEL = "eg2_audio_fp32.tflite"
+
+    /** The default model: the fp16-weight pair `eg2_audio_f16safe_fp16w_w30.tflite` + `_w10.tflite` (README.md, The model files). */
+    const val DEFAULT_MODEL = "eg2_audio_f16safe_fp16w_w30.tflite"
     const val CPU_THREADS = 4
     const val SCAN_THREADS = 4
 
@@ -48,8 +50,24 @@ object Engine {
     class Loaded(
         val encoder: Encoder,
         val requested: Backend,
+        /** The file asked for and its size (a fallback may run another window's file: [Encoder.file]). */
+        val wanted: File,
+        val wantedBytes: Long,
         val fallback: String?,
         val delegateLines: List<String>,
+        /** The NPU attempt behind this load (also when it fell back); null when the NPU was not asked for. */
+        val npu: NpuAttempt?,
+    )
+
+    /** An NPU attempt: the cache, the compile, whether LiteRT's dispatch delegate took the graph, and the error if it failed. */
+    class NpuAttempt(
+        val prepared: Npu.Prepared?,
+        /** True: "Replacing … with delegate (DispatchDelegate)" in the log; false: the graph went to the CPU instead; null: the log did not say. */
+        val dispatch: Boolean?,
+        val compileMs: Double?,
+        val cacheBytesAfter: Long?,
+        val keyLines: List<String>,
+        val error: String?,
     )
 
     class ReaderSet(val reader: Reader, val table: WordTable, val note: String)
@@ -96,31 +114,113 @@ object Engine {
         return ReaderSet(Stub.reader(), Stub.table(vocab), "stub: words are placeholders ($why)")
     }
 
+    /** The file [backend] runs for windows of [windowFrames] frames: the NPU only the 10 s file, the others the asked length first. */
+    fun fileFor(choice: ModelChoice, backend: Backend, windowFrames: Int): File? =
+        if (backend == Backend.NPU) choice.npuFile
+        else choice.fileFor(windowFrames) ?: choice.fileFor(if (windowFrames == WindowPlan.FRAMES_30S) WindowPlan.FRAMES_10S else WindowPlan.FRAMES_30S)
+
     /**
-     * Compiles [file] for [backend] unless that is what is loaded. A GPU that fails to compile or to run, or gives
-     * non-finite values in the warm-up, falls back to the CPU and says so; the NPU does not fall back.
+     * Compiles the file of [choice] that [backend] runs for windows of [windowFrames] frames ([fileFor]) unless that is
+     * what is loaded. Fallbacks, each said on the screen: the NPU -> GPU fp32 (the asked window's file) when the model
+     * has no 10 s file, the NPU is not available here, cannot compile or run the graph, or did not get the graph
+     * (LiteRT 2.2.0 moves a graph its NPU compiler cannot take to the CPU without an error); a GPU -> the CPU when it
+     * cannot compile or run the graph or gives non-finite values in the warm-up. [onStage] gets the screen's sentence
+     * for each stage.
      */
-    fun ensureEncoder(context: Context, file: File, backend: Backend): Loaded {
-        loaded?.let { l -> if (l.requested == backend && l.encoder.file == file && l.encoder.file.length() == file.length()) return l }
+    fun ensureEncoder(context: Context, choice: ModelChoice, backend: Backend, windowFrames: Int, onStage: (String) -> Unit = {}): Loaded {
+        val wanted = fileFor(choice, backend, windowFrames)
+        isLoaded(choice, backend, windowFrames)?.let { return it }
         closeEncoder()
         val since = OwnLog.now()
         var fallback: String? = null
-        val enc = try {
-            Encoder.open(context, file, backend, CPU_THREADS).also { e ->
-                if (backend.isGpu && !e.warmupFinite) {
-                    LiteRt.call { e.close() }
-                    throw EncoderException("not_finite", "${backend.label} gave NaN or infinite values in a test run")
-                }
+        var npu: NpuAttempt? = null
+        var enc: Encoder? = null
+        if (backend == Backend.NPU) {
+            if (wanted == null) {
+                if (choice.missing) throw EncoderException("model_missing", "The encoder file ${choice.name} is not on this phone.")
+                val why = "The NPU runs only the 10 s encoder file (${choice.name}_w10.tflite), which is not on this phone"
+                npu = NpuAttempt(null, null, null, null, emptyList(), why)
+            } else {
+                val (e, attempt) = tryNpu(context, wanted, onStage)
+                enc = e
+                npu = attempt
             }
-        } catch (e: EncoderException) {
-            if (!backend.isGpu || e.code !in setOf("compile_failed", "run_failed", "not_finite")) throw e
-            fallback = "${e.text}. Running on the CPU instead."
-            Log.w(TAG, "FALLBACK backend=${backend.id} -> cpu: ${e.text}", e.cause)
-            Encoder.open(context, file, Backend.CPU, CPU_THREADS)
+            if (enc == null) {
+                fallback = "${npu!!.error!!.removeSuffix(".")}. Running on GPU fp32 instead."
+                Log.w(TAG, "FALLBACK backend=npu -> gpu_fp32: ${npu.error}")
+            }
+        }
+        if (enc == null) {
+            val gpu = if (backend == Backend.NPU) Backend.GPU_FP32 else backend
+            val file = fileFor(choice, gpu, windowFrames) ?: throw EncoderException("model_missing", "The encoder file ${choice.name} is not on this phone.")
+            onStage("Compiling the encoder for ${gpu.label}…")
+            enc = try {
+                Encoder.open(context, file, gpu, CPU_THREADS).also { e ->
+                    if (gpu.isGpu && !e.warmupFinite) {
+                        LiteRt.call { e.close() }
+                        throw EncoderException("not_finite", "${gpu.label} gave NaN or infinite values in a test run")
+                    }
+                }
+            } catch (e: EncoderException) {
+                if (!gpu.isGpu || e.code !in setOf("compile_failed", "run_failed", "not_finite")) throw e
+                fallback = (fallback?.let { "$it " } ?: "") + "${e.text}. Running on the CPU instead."
+                Log.w(TAG, "FALLBACK backend=${gpu.id} -> cpu: ${e.text}", e.cause)
+                onStage("Compiling the encoder for the CPU…")
+                Encoder.open(context, file, Backend.CPU, CPU_THREADS)
+            }
         }
         val lines = OwnLog.delegateLines(since)
         for (l in lines) Log.i(TAG, "DELEGATE $l")
-        return Loaded(enc, backend, fallback, lines).also { loaded = it }
+        val w = loadKey(choice, backend, windowFrames) ?: enc!!.file
+        return Loaded(enc!!, backend, w, w.length(), fallback, lines, npu).also { loaded = it }
+    }
+
+    /** The file a load for these settings is known by: the one [fileFor] picks, or for the NPU without a 10 s file the GPU's. */
+    private fun loadKey(choice: ModelChoice, backend: Backend, windowFrames: Int): File? =
+        fileFor(choice, backend, windowFrames) ?: if (backend == Backend.NPU) fileFor(choice, Backend.GPU_FP32, windowFrames) else null
+
+    /** The loaded encoder when it is the one these settings ask for (same file, same size: not replaced since), else null. */
+    fun isLoaded(choice: ModelChoice, backend: Backend, windowFrames: Int): Loaded? {
+        val l = loaded ?: return null
+        val key = loadKey(choice, backend, windowFrames) ?: return null
+        return l.takeIf { it.requested == backend && it.wanted == key && it.wantedBytes == key.length() }
+    }
+
+    /** One NPU compile of [file]: the encoder, or null and the reason in the attempt's error. */
+    private fun tryNpu(context: Context, file: File, onStage: (String) -> Unit): Pair<Encoder?, NpuAttempt> {
+        val since = OwnLog.now()
+        var prepared: Npu.Prepared? = null
+        fun attempt(dispatch: Boolean?, compileMs: Double?, error: String?): NpuAttempt {
+            val log = OwnLog.lines(since)
+            val cacheBytes = prepared?.let { p -> listOf(p.cacheDir, p.plainCacheDir).distinct().sumOf { Npu.bytes(it) } }
+            return NpuAttempt(prepared, dispatch ?: OwnLog.dispatchDelegate(log), compileMs, cacheBytes, OwnLog.npuKeyLines(log), error)
+        }
+        return try {
+            Npu.unavailable(context)?.let { return null to attempt(null, null, it) }
+            onStage("Checking the NPU cache for ${file.name}…")
+            val p = Npu.prepare(context, file)
+            prepared = p
+            Log.i(TAG, "NPU_CACHE sha256=${p.sha256} sha256_ms=${Jobs.fmt(p.sha256Ms)} path=${p.path} cache_dir=${p.cacheDir} cached_before=${p.cachedBefore}" + (p.note?.let { " note=$it" } ?: ""))
+            onStage(if (p.cachedBefore) "Loading the NPU encoder from its cache…" else "Compiling the encoder for the NPU (first time, about 2–3 minutes)…")
+            val e = Encoder.open(context, file, Backend.NPU, CPU_THREADS, p)
+            val dispatch = OwnLog.dispatchDelegate(OwnLog.lines(since))
+            when {
+                dispatch == false -> {
+                    LiteRt.call { e.close() }
+                    null to attempt(false, e.compileMs, "The NPU compiler did not take the encoder graph (LiteRT put it on the CPU)")
+                }
+                !e.warmupFinite -> {
+                    LiteRt.call { e.close() }
+                    null to attempt(dispatch, e.compileMs, "The NPU gave NaN or infinite values in a test run")
+                }
+                else -> e to attempt(dispatch, e.compileMs, null)
+            }
+        } catch (e: EncoderException) {
+            null to attempt(null, null, e.text)
+        } catch (t: Throwable) {
+            Log.e(TAG, "ERROR npu ${t.message}", t)
+            null to attempt(null, null, "The NPU failed: ${t.javaClass.simpleName}: ${t.message}")
+        }
     }
 
     fun closeEncoder() {
@@ -165,14 +265,51 @@ object OwnLog {
 
     fun now(): String = synchronized(stamp) { stamp.format(Date()) }
 
-    /** Lines since [since] that say where a graph runs: LiteRT, TFLite, delegate, accelerator, XNNPACK, OpenCL, QNN. */
-    fun delegateLines(since: String, max: Int = 60): List<String> = runCatching {
+    /** This process's log lines since [since] (logcat's time format), or null when logcat cannot be read. */
+    fun lines(since: String): List<String>? = runCatching {
         val p = ProcessBuilder("logcat", "-d", "-v", "time", "-T", since, "--pid=${android.os.Process.myPid()}").redirectErrorStream(true).start()
         val lines = p.inputStream.bufferedReader().readLines()
         p.waitFor()
-        val keys = listOf("delegate", "replacing", "accelerator", "xnnpack", "opencl", "qnn", "dispatch", "litert", "tflite", "npu")
-        lines.filter { l -> !l.contains(Engine.TAG) && keys.any { l.lowercase().contains(it) } }.takeLast(max)
-    }.getOrElse { listOf("logcat could not be read: ${it.message}") }
+        lines
+    }.getOrNull()
+
+    private val KEYS = listOf("delegate", "replacing", "accelerator", "xnnpack", "opencl", "qnn", "dispatch", "litert", "tflite", "npu")
+
+    /**
+     * Lines since [since] that say where a graph runs (LiteRT, TFLite, delegate, accelerator, XNNPACK, OpenCL, QNN):
+     * every "Replacing … node(s) with delegate" line once, the NPU compiler's summary lines, then the last ones up to
+     * [max] (an NPU compile logs thousands of QNN lines).
+     */
+    fun delegateLines(since: String, max: Int = 60): List<String> {
+        val all = lines(since) ?: return listOf("logcat could not be read")
+        val keyed = all.filter { l -> !l.contains(Engine.TAG) && KEYS.any { l.lowercase().contains(it) } }
+        val firsts = LinkedHashMap<String, String>()
+        for (l in keyed) if (l.contains("Replacing ") || isNpuSummary(l)) firsts.putIfAbsent(l.substringAfter("): ", l), l)
+        val head = firsts.values.take(max * 2 / 3)
+        return head + keyed.takeLast(maxOf(0, max - head.size)).filter { it !in head }
+    }
+
+    private fun isNpuSummary(l: String) = listOf(
+        "caching enabled", "Partitioned subgraph", "compiler plugins were applied", "Failed to apply compiler plugins", "Plugin errs",
+        "initialized from cached model", "Flatbuffer model initialized", "NPU accelerator", "QnnDsp <E>",
+    ).any { l.contains(it) }
+
+    /** The NPU compiler's lines in [log] (cache, partition, plugin result, dispatch), at most 40. */
+    fun npuKeyLines(log: List<String>?): List<String> =
+        log?.filter { l -> !l.contains(Engine.TAG) && (isNpuSummary(l) || (l.contains("Replacing ") && l.contains("delegate"))) }?.distinct()?.take(40) ?: emptyList()
+
+    /**
+     * Whether LiteRT's dispatch delegate took a graph, from [log]: true when "Replacing … with delegate
+     * (DispatchDelegate)" is there; false when only CPU / GPU delegates replaced nodes of the main graph; null when
+     * the log says neither (or could not be read).
+     */
+    fun dispatchDelegate(log: List<String>?): Boolean? {
+        if (log == null) return null
+        val replacing = log.filter { it.contains("Replacing ") && it.contains("with delegate") }
+        if (replacing.any { it.contains("(DispatchDelegate)") }) return true
+        if (replacing.any { it.contains("subgraph 0") }) return false
+        return null
+    }
 }
 
 /** JSON helpers for the run report. */

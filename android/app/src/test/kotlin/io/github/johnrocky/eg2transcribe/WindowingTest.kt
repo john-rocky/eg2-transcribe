@@ -77,6 +77,48 @@ class WindowingTest {
         assertEquals(165, r.tokens)
     }
 
+    @Test
+    fun tenSecondWindowsOnTheLongFixture() {
+        // The NPU's windows: 10 s with the same 96-token overlap advance 616 frames (1.623x the encoder work).
+        val p = WindowPlan(325_744, WindowPlan.FRAMES_10S, WindowPlan.DEFAULT_OVERLAP)
+        assertEquals(616, p.stride)
+        assertEquals(529, p.count)
+        assertEquals(81_436, p.tokens)
+        assertEquals(1.623, p.computeFactor, 0.001)
+        assertEquals(0 until 250, p.kept(0))
+        // Window 1 starts at frame 616 = token 154; its first 96 tokens (154..249) are the overlap, it keeps 250..403.
+        assertEquals(154, p.firstToken(1))
+        assertEquals(96, p.keepFrom(1))
+        assertEquals(250 until 404, p.kept(1))
+        assertEquals(404 until 558, p.kept(2))
+        val last = p.count - 1
+        assertEquals(325_248, p.start(last))
+        assertEquals(496, p.validFrames(last))
+        assertEquals(124, p.keepUntil(last))
+        assertEquals(81_408 until 81_436, p.kept(last))
+        checkCover(p)
+    }
+
+    @Test
+    fun tenSecondWindowsAtTheEndOfARecording() {
+        // f30 on the NPU: 2,999 frames in 5 windows of 10 s; token 749 (frame 2,999 missing) is dropped.
+        val p = WindowPlan(2999, WindowPlan.FRAMES_10S, 96)
+        assertEquals(5, p.count)
+        assertEquals(listOf(0, 616, 1232, 1848, 2464), (0 until p.count).map { p.start(it) })
+        assertEquals(535, p.validFrames(4))
+        assertEquals(134, p.validTokens(4)) // what the encoder marks valid in the last window
+        assertEquals(133, p.keepUntil(4)) // what is kept: up to token 748 of the recording
+        assertEquals(712 until 749, p.kept(4))
+        assertEquals(749, p.tokens)
+        checkCover(p)
+        // One frame more: token 749 is whole and kept by the same last window.
+        assertEquals(712 until 750, WindowPlan(3000, WindowPlan.FRAMES_10S, 96).kept(4))
+        // A recording of exactly one 10 s window plus a frame stays one window.
+        assertEquals(1, WindowPlan(1001, WindowPlan.FRAMES_10S, 96).count)
+        assertEquals(0 until 250, WindowPlan(1001, WindowPlan.FRAMES_10S, 96).kept(0))
+        assertEquals(2, WindowPlan(1004, WindowPlan.FRAMES_10S, 96).count)
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun overlapTooLarge() {
         WindowPlan(10_000, WindowPlan.FRAMES_10S, WindowPlan.maxOverlap(WindowPlan.FRAMES_10S) + 1)

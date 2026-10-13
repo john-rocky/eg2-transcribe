@@ -1,6 +1,7 @@
 package io.github.johnrocky.eg2transcribe
 
 import android.content.Context
+import android.util.Log
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
 import com.google.ai.edge.litert.Environment
@@ -33,8 +34,13 @@ enum class Backend(val id: String, val label: String) {
 /**
  * The LiteRT thread and the process-wide Environment. Every CompiledModel call runs on this one thread. An APK that
  * carries the Qualcomm NPU libraries gets an Environment that knows their directory (dispatch and JIT compiler
- * plugin), and every graph it compiles, on any accelerator, asks for the HTP's BURST mode: LiteRT 2.2.0 starts the
- * NPU runtime once per process from the first graph's options.
+ * plugin) and keeps compiled NPU graphs in [Npu.cacheRoot], and every graph it compiles, on any accelerator, asks for
+ * the HTP's BURST mode: LiteRT 2.2.0 starts the NPU runtime once per process from the first graph's options.
+ *
+ * LiteRT logs "NPU accelerator could not be loaded and registered: kLiteRtStatusErrorInvalidArgument" once per
+ * process, about a second after this Environment registered the NPU accelerator: that is a second, internal
+ * Environment LiteRT 2.2.0 makes without options for its older C++ paths (`TensorBuffer::GetDefaultEnvironment()`),
+ * which has no dispatch library directory. It does not change this one.
  */
 object LiteRt {
     val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "litert").apply { isDaemon = true } }
@@ -47,8 +53,9 @@ object LiteRt {
             npuPackaged = Npu.packaged(context)
             val e = if (npuPackaged) {
                 val dir = context.applicationInfo.nativeLibraryDir
-                Environment.create(context, mapOf(Environment.Option.DispatchLibraryDir to dir, Environment.Option.CompilerPluginLibraryDir to dir))
+                Environment.create(Npu.cacheContext(context), mapOf(Environment.Option.DispatchLibraryDir to dir, Environment.Option.CompilerPluginLibraryDir to dir))
             } else Environment.create()
+            Log.i(Engine.TAG, "STEP environment npu_libraries=$npuPackaged accelerators=${runCatching { e.getAvailableAccelerators() }.getOrNull()}")
             env = e
             e
         }
@@ -68,10 +75,10 @@ object LiteRt {
 class EncoderException(val code: String, val text: String, cause: Throwable? = null) : Exception(text, cause)
 
 /**
- * The EmbeddingGemma 2 audio encoder exported to LiteRT: one .tflite with the signatures `audio_10s` (mel
- * [1, 1000, 128] + mask [1, 1000] -> soft [1, 250, 512] + mask [1, 250]) and `audio_30s` (3000 frames -> 750 tokens),
- * masks in float32 (1 = a real frame / token). Either one alone also works. Buffers are made once per signature
- * and reused; one window runs at a time, on the LiteRT thread.
+ * The EmbeddingGemma 2 audio encoder exported to LiteRT: a .tflite with the signature `audio_10s` (mel
+ * [1, 1000, 128] + mask [1, 1000] -> soft [1, 250, 512] + mask [1, 250]) or `audio_30s` (3000 frames -> 750 tokens),
+ * or both, masks in float32 (1 = a real frame / token). The export gives one file per window ([ModelChoice]).
+ * Buffers are made once per signature and reused; one window runs at a time, on the LiteRT thread.
  */
 class Encoder private constructor(
     val file: File,
@@ -80,6 +87,8 @@ class Encoder private constructor(
     private val sigs: Map<Int, Sig>,
     val compileMs: Double,
     val threads: Int,
+    /** The NPU's cache and link facts ([Npu.prepare]); null on the CPU and the GPU. */
+    val npu: Npu.Prepared?,
 ) : EncoderRunner, Closeable {
     private class Sig(val name: String, val frames: Int, val mel: TensorBuffer, val mask: TensorBuffer, val soft: TensorBuffer, val outMask: TensorBuffer) {
         val inputs = mapOf("mel" to mel, "mask" to mask)
@@ -133,8 +142,12 @@ class Encoder private constructor(
         /** log(0 + 0.001): the log-mel of digital silence. */
         private const val SILENCE = -6.9077554f
 
-        /** Compiles [file] for [backend] and warms it up. On the LiteRT thread. */
-        fun open(context: Context, file: File, backend: Backend, cpuThreads: Int): Encoder = LiteRt.call {
+        /**
+         * Compiles [file] for [backend] and warms it up (LiteRT thread; [prepared] = [Npu.prepare] of [file], on the
+         * NPU). The NPU gets the NPU and the CPU accelerators, as the native runner of the measurements did: the
+         * Qualcomm plugin takes the whole graph, and the CPU is there for an op it would leave out.
+         */
+        fun open(context: Context, file: File, backend: Backend, cpuThreads: Int, prepared: Npu.Prepared? = null): Encoder = LiteRt.call {
             if (!file.isFile || file.length() == 0L) throw EncoderException("model_missing", "The encoder file ${file.name} is not on this phone.")
             if (backend == Backend.NPU) Npu.unavailable(context)?.let { throw EncoderException("npu_unavailable", it) }
             val env = LiteRt.environment(context)
@@ -146,15 +159,18 @@ class Encoder private constructor(
                 Backend.CPU -> CompiledModel.Options(Accelerator.CPU).apply { cpuOptions = CompiledModel.CpuOptions(numThreads = cpuThreads) }
                 Backend.GPU_FP32 -> CompiledModel.Options(Accelerator.GPU).apply { gpuOptions = CompiledModel.GpuOptions(precision = CompiledModel.GpuOptions.Precision.FP32) }
                 Backend.GPU_DEFAULT -> CompiledModel.Options(Accelerator.GPU).apply { gpuOptions = CompiledModel.GpuOptions(precision = CompiledModel.GpuOptions.Precision.DEFAULT) }
-                Backend.NPU -> CompiledModel.Options(Accelerator.NPU)
+                Backend.NPU -> CompiledModel.Options(Accelerator.NPU, Accelerator.CPU).apply { cpuOptions = CompiledModel.CpuOptions(numThreads = cpuThreads) }
             }.apply { qualcommOptions = burst }
+            val path = if (backend == Backend.NPU) (prepared?.path ?: file) else file
+            Log.i(Engine.TAG, "STEP compile backend=${backend.id} path=${path.absolutePath}")
             val t = System.nanoTime()
             val model = try {
-                CompiledModel.create(file.absolutePath, options, env)
+                CompiledModel.create(path.absolutePath, options, env)
             } catch (e: Throwable) {
                 throw EncoderException("compile_failed", "${backend.label} could not compile ${file.name}: ${e.javaClass.simpleName}: ${e.message}", e)
             }
             val compileMs = (System.nanoTime() - t) / 1e6
+            Log.i(Engine.TAG, "STEP compiled backend=${backend.id} ms=${"%.1f".format(java.util.Locale.US, compileMs)}")
             val sigs = LinkedHashMap<Int, Sig>()
             val enc = try {
                 for ((frames, name) in SIGNATURES) {
@@ -175,7 +191,8 @@ class Encoder private constructor(
                     "not_an_encoder",
                     "${file.name} is not the EmbeddingGemma 2 audio encoder export: no signature audio_30s or audio_10s with mel [1, F, 128] + mask [1, F] -> soft [1, F/4, 512] + mask [1, F/4].",
                 )
-                Encoder(file, backend, model, sigs, compileMs, cpuThreads)
+                Log.i(Engine.TAG, "STEP buffers signatures=${sigs.values.map { it.name }}")
+                Encoder(file, backend, model, sigs, compileMs, cpuThreads, if (backend == Backend.NPU) prepared else null)
             } catch (e: Throwable) {
                 sigs.values.forEach { it.close() }
                 runCatching { model.close() }
@@ -188,6 +205,7 @@ class Encoder private constructor(
                 enc.close()
                 throw EncoderException("run_failed", "${backend.label} compiled ${file.name} but the first run failed: ${e.javaClass.simpleName}: ${e.message}", e)
             }
+            Log.i(Engine.TAG, "STEP warmed_up ${enc.warmupMs}")
             enc
         }
     }
