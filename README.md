@@ -14,6 +14,10 @@ reproduction for phones: Android on LiteRT and iOS on Core AI. It is not affilia
 | `android/` | Android app on LiteRT (encoder + reader on CPU / GPU / NPU) |
 | `ios/` | iOS and macOS app on Core AI (encoder + reader on GPU / Neural Engine) |
 
+## Android
+
+`android/` is an app for Android 8.0+ (arm64) on LiteRT: record with the microphone or open an audio file, and the words appear with their times, without leaving the phone. The encoder runs on the CPU, the GPU or a Qualcomm NPU, on 30 s windows that overlap by 3.84 s so that each window starts with the context it needs. The encoder file (`eg2_audio_fp32.tflite`, 1.18 GB) is not in this repository; `android/README.md` says how to put it on the phone and how the device check works. Until the trained reader is out, the app reads with a stub whose words are placeholders. On a Galaxy S26 it went through a 54-minute recording in 42.1 s on the GPU (77× real time, not counting reading the file; with the placeholder reader), and its words matched the same pipeline run on a computer token for token (`android/README.md` has the table).
+
 Status: in progress (started 2026-10-13). Numbers appear here only after they are measured on a device.
 
 License: Apache-2.0 for the code in this repository. EmbeddingGemma 2 weights are Apache-2.0 and

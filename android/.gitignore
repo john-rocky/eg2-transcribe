@@ -1,0 +1,11 @@
+# Build output
+build/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+# Model files and Qualcomm's NPU libraries are never in this repository (README.md)
+*.tflite
+*.litertlm
+app/src/main/jniLibs/**/*.so

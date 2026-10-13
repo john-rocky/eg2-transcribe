@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The Record button only. No INTERNET: audio, model and transcript stay on the phone. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:largeHeap="true"
+        android:theme="@style/Theme.Eg2Transcribe">
+        <!-- The GPU accelerator opens the vendor OpenCL library (apps targeting Android 12+ must list it). -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL-pixel.so" android:required="false" />
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
+        <!-- The Qualcomm NPU's FastRPC transport, for an APK that carries the NPU libraries (README.md, NPU). -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
+        <!-- singleTask: a start with extras (the device check) reaches the running screen. configChanges: a rotation
+             keeps the activity, so a running transcription and its screen are not rebuilt. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
