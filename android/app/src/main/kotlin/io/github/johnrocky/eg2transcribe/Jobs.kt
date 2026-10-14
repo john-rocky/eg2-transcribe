@@ -190,7 +190,8 @@ object Jobs {
             "expected_samples" to decoded.expectedSamples, "missing_samples" to decoded.expectedSamples?.let { it - decoded.samples },
             "decode" to decoded.stats,
         )
-        Log.i(TAG, "INPUT source=file label=$label samples=${decoded.samples} expected=${decoded.expectedSamples} format=${decoded.format} rate=${decoded.sourceRate} channels=${decoded.channels} resampled=${decoded.resampled} decode_ms=${fmt(decoded.ms)} decode_mode=${decoded.stats.optString("mode")} capped=${decoded.stats.optBoolean("capped")}")
+        Log.i(TAG, "INPUT source=file label=$label samples=${decoded.samples} expected=${decoded.expectedSamples} format=${decoded.format} rate=${decoded.sourceRate} channels=${decoded.channels} resampled=${decoded.resampled} decode_ms=${fmt(decoded.ms)} decode_mode=${decoded.stats.optString("mode")} path=${decoded.stats.optString("path")} capped=${decoded.stats.optBoolean("capped")}" +
+            (decoded.stats.optString("fallback_reason").takeIf { it.isNotEmpty() }?.let { " fallback=$it" } ?: ""))
         return Session.Input(pcm, label, json) to null
     }
 
@@ -213,12 +214,31 @@ object Jobs {
         val d = j.optJSONObject("decode")
         val capped = d?.optBoolean("capped") == true
         val audioS = if (capped) d?.optDouble("source_position_s", samples / 16000.0) ?: (samples / 16000.0) else samples / 16000.0
+        // The reader that gave the samples: a FLAC file can end up on MediaCodec when the FLAC reader could not read it.
+        val how = when {
+            d == null -> mode.label
+            d.optString("fallback_reason").isNotEmpty() -> "MediaCodec (the FLAC reader could not read it: ${d.optString("fallback_reason")})"
+            d.optString("path") == AudioDecoder.Path.FLAC.id -> AudioDecoder.Mode.FLAC.label
+            d.optString("path") == AudioDecoder.Path.WAV.id -> "WAV read directly"
+            else -> AudioDecoder.Mode.parse(d.optString("mode"))?.label ?: d.optString("mode")
+        }
         val text = (if (capped) "Stopped after ${secs(ms)}: " else "") +
             "read ${Session.clock(samples / 16000.0)} of audio (${"%,d".format(Locale.US, samples)} samples) in ${secs(ms)} " +
-            "(${"%.1f".format(Locale.US, audioS / (ms / 1000.0))}× real time), ${mode.label}."
+            "(${"%.1f".format(Locale.US, audioS / (ms / 1000.0))}× real time), $how."
         Session.inputLine = "$label · ${Session.clock(samples / 16000.0)} · ${j.optString("format")}"
         Session.detailLine = d?.let { decodeLine(it) } ?: ""
         finish(context, req, if (capped) "capped" else "ok", "READ", text, input = j, tone = Session.Tone.OK)
+    }
+
+    /** The detail line's word on how a file was read: " (FLAC reader)", " (MediaCodec; the FLAC reader could not read it: …)", or nothing. */
+    private fun readPath(input: JSONObject): String {
+        val d = input.optJSONObject("decode") ?: return ""
+        val why = d.optString("fallback_reason")
+        return when {
+            why.isNotEmpty() -> " (MediaCodec; the FLAC reader could not read it: $why)"
+            d.optString("path") == AudioDecoder.Path.FLAC.id -> " (FLAC reader)"
+            else -> ""
+        }
     }
 
     /** SHA-256 of a file (hex) and the ms it took. */
@@ -461,7 +481,7 @@ object Jobs {
                 (if (pick.setting == "auto") " (auto: ${pick.reason})" else "") +
                 " · encoder median ${fmt(median)} ms (${split("encoder")}), reader median ${fmt(readerMedian)} ms (${split("reader")}) a window · " +
                 "log-mel ${secs(r.melMs)} · labels ${secs(r.decodeMs)} · ${r.plan.tokens} tokens · ${r.words.size} words" +
-                (if (decodeMs > 0) " · file read ${secs(decodeMs)}" else "")
+                (if (decodeMs > 0) " · file read ${secs(decodeMs)}" + readPath(input.json) else "")
             val text = r.words.joinToString(" ") { it.text }
             val status = if (r.cancelled) "cancelled" else "ok"
             val pill = if (r.cancelled) "STOPPED" else "DONE"

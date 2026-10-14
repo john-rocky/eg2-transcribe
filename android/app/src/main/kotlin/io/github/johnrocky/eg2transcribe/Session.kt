@@ -21,7 +21,7 @@ object Session {
 
     /** Hidden settings (launch extras only): the reader's GPU precision, and how a compressed file is decoded. */
     @Volatile var readerPrecision = ReaderPrecision.FP32
-    @Volatile var decodeMode = AudioDecoder.Mode.SYNC
+    @Volatile var decodeMode = AudioDecoder.Mode.FLAC
 
     /** The recording harness (launch extras): the file picker's first folder, and a report for a file picked by hand. */
     @Volatile var pickerDir: String? = null

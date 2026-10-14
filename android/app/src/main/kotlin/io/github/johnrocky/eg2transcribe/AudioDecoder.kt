@@ -39,7 +39,11 @@ object AudioDecoder {
 
     class DecodeException(text: String, cause: Throwable? = null) : Exception(text, cause)
 
-    /** How a compressed file is fed through MediaCodec (the default is [SYNC]; the others are kept to measure against it). */
+    /**
+     * How a file is read (launch extra `decode_mode`). [FLAC], the default: a FLAC file with [FlacDecoder], anything else
+     * with MediaCodec's [SYNC] loop. [SYNC], [ASYNC] and [LEGACY] send every compressed file through MediaCodec (kept to
+     * measure against). A WAV file is always read directly.
+     */
     enum class Mode(val id: String, val label: String) {
         /** One thread: every free input buffer filled, every ready output buffer drained, a wait (10 ms) only when neither moved. */
         SYNC("sync", "sync loop"),
@@ -50,11 +54,33 @@ object AudioDecoder {
         /** The loop of the builds before this one: free inputs filled, then one output buffer a turn, a 5 ms wait after an empty poll. */
         LEGACY("legacy", "earlier loop"),
 
-        /** A FLAC file read by [FlacDecoder] in this process, without MediaExtractor and MediaCodec (other files: [SYNC]). */
+        /**
+         * A FLAC file read by [FlacDecoder] in this process, without MediaExtractor and MediaCodec; one it cannot read (a
+         * CRC that does not match, a stream that ends early, a form it does not know) goes to MediaCodec instead, and
+         * the report says why. Other files: [SYNC].
+         */
         FLAC("flac", "Kotlin FLAC reader");
 
         companion object {
             fun parse(s: String?): Mode? = entries.firstOrNull { it.id == s?.lowercase() }
+        }
+    }
+
+    /** Which reader a file goes to. */
+    enum class Path(val id: String) { WAV("wav"), FLAC("flac reader"), MEDIACODEC("mediacodec") }
+
+    /**
+     * The reader for a file that starts with [head] ([n] bytes read) and is named [name]: WAV read directly; with
+     * [Mode.FLAC], a FLAC file (the `fLaC` marker, or an ID3 tag in front of a file named `.flac`) by [FlacDecoder];
+     * everything else by MediaCodec.
+     */
+    fun pathFor(head: ByteArray, n: Int, name: String?, mode: Mode): Path {
+        fun ascii(o: Int, k: Int) = if (n >= o + k) String(head, o, k, Charsets.US_ASCII) else ""
+        return when {
+            ascii(0, 4) == "RIFF" && ascii(8, 4) == "WAVE" -> Path.WAV
+            mode == Mode.FLAC && ascii(0, 4) == "fLaC" -> Path.FLAC
+            mode == Mode.FLAC && ascii(0, 3) == "ID3" && name?.lowercase()?.endsWith(".flac") == true -> Path.FLAC
+            else -> Path.MEDIACODEC
         }
     }
 
@@ -64,9 +90,13 @@ object AudioDecoder {
      * the samples out (to mono floats and into the PCM file), releaseOutputBuffer; and a time line ([curve]: every 2 s
      * the output buffers, samples and source position so far), to tell a constant rate from one that falls.
      */
-    class Stats(val mode: String) {
+    class Stats(var mode: String) {
         var readNs = 0L; var queueInNs = 0L; var dequeueInNs = 0L; var dequeueOutNs = 0L; var waitNs = 0L
         var convertNs = 0L; var releaseNs = 0L
+
+        /** The reader that gave the samples ([Path.id]), and why the FLAC reader handed a file to MediaCodec (null: it did not). */
+        var path = ""
+        var fallbackReason: String? = null
 
         /** [Mode.FLAC]: reading and decoding the frames in Kotlin (the MediaCodec stages stay 0). */
         var flacNs = 0L
@@ -91,6 +121,8 @@ object AudioDecoder {
 
         fun json(): JSONObject = JSONObject().apply {
             put("mode", mode)
+            put("path", path)
+            fallbackReason?.let { put("fallback_reason", it) }
             codec?.let { put("codec", it) }
             codecSoftware?.let { put("codec_software_only", it) }
             for ((k, v) in listOf("read_ms" to readNs, "queue_in_ms" to queueInNs, "dequeue_in_ms" to dequeueInNs, "dequeue_out_ms" to dequeueOutNs,
@@ -108,19 +140,33 @@ object AudioDecoder {
      * Decodes [uri] to [out]. [mode]: how MediaCodec is driven (not used for WAV); [capMs]: stop after that much time and
      * keep what was decoded (the decode probe; [Stats.capped]).
      */
-    fun decode(context: Context, uri: Uri, out: File, cancel: () -> Boolean = { false }, mode: Mode = Mode.SYNC, capMs: Long? = null, progress: (Double) -> Unit = {}): Decoded {
+    fun decode(context: Context, uri: Uri, out: File, cancel: () -> Boolean = { false }, mode: Mode = Mode.FLAC, capMs: Long? = null, progress: (Double) -> Unit = {}): Decoded {
         val t = System.nanoTime()
         val head = ByteArray(12)
         val n = context.contentResolver.openInputStream(uri)?.use { readFully(it, head) } ?: throw DecodeException("The file could not be opened.")
-        val isWav = n == 12 && String(head, 0, 4, Charsets.US_ASCII) == "RIFF" && String(head, 8, 4, Charsets.US_ASCII) == "WAVE"
-        val isFlac = n >= 4 && String(head, 0, 4, Charsets.US_ASCII) == "fLaC"
-        val media = if (mode == Mode.FLAC && !isFlac) Mode.SYNC else mode
-        val stats = Stats(if (isWav) "wav" else media.id)
+        val path = pathFor(head, n, uri.lastPathSegment, mode)
+        val media = if (mode == Mode.FLAC) Mode.SYNC else mode
+        val stats = Stats(when (path) { Path.WAV -> "wav"; Path.FLAC -> Mode.FLAC.id; Path.MEDIACODEC -> media.id })
+        stats.path = path.id
         val deadline = capMs?.let { t + it * 1_000_000L }
-        val r = when {
-            isWav -> decodeWav(context, uri, out, cancel, progress)
-            media == Mode.FLAC -> decodeFlac(context, uri, out, cancel, progress, stats, deadline)
-            else -> decodeMedia(context, uri, out, cancel, progress, media, stats, deadline)
+        val r = when (path) {
+            Path.WAV -> decodeWav(context, uri, out, cancel, progress)
+            Path.FLAC -> try {
+                decodeFlac(context, uri, out, cancel, progress, stats, deadline)
+            } catch (e: Exception) {
+                if (cancel()) throw e
+                // A FLAC file the reader cannot read goes to MediaCodec, which writes the PCM file again from the start.
+                stats.fallbackReason = if (e is DecodeException) e.message ?: "DecodeException" else "${e.javaClass.simpleName}: ${e.message}"
+                stats.path = Path.MEDIACODEC.id
+                stats.mode = media.id
+                try {
+                    decodeMedia(context, uri, out, cancel, progress, media, stats, deadline)
+                } catch (e2: Exception) {
+                    if (cancel()) throw e2
+                    throw DecodeException("the FLAC reader could not read it (${stats.fallbackReason}), and MediaCodec could not either (${e2.message ?: e2.javaClass.simpleName})", e2)
+                }
+            }
+            Path.MEDIACODEC -> decodeMedia(context, uri, out, cancel, progress, media, stats, deadline)
         }
         return Decoded(r.samples, r.sourceRate, r.channels, r.format, r.resampled, (System.nanoTime() - t) / 1e6, r.expectedSamples, stats.json())
     }
@@ -169,6 +215,10 @@ object AudioDecoder {
                         val f = decoded.toDouble() / info.totalSamples
                         if (f - lastProgress >= 0.005) { progress(f); lastProgress = f }
                     }
+                }
+                // A stream that ends on a frame boundary before the length its STREAMINFO declares is cut short too.
+                if (!st.capped && info.totalSamples > 0 && decoded != info.totalSamples) {
+                    throw DecodeException("This FLAC file could not be read (it ends after $decoded of the ${info.totalSamples} samples it declares).")
                 }
                 sink.close()
                 st.point(sink.written, force = true)

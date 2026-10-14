@@ -3,6 +3,7 @@ package io.github.johnrocky.eg2transcribe
 import java.io.File
 import java.security.MessageDigest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
@@ -43,6 +44,55 @@ class FlacTest {
         val (n, sha) = decode(File("src/main/assets/examples/1284-1180-0000.flac"))
         assertEquals(129_920L, n)
         assertEquals("afd1b2e3f459ad1cb2e2274b621bff26236dd044e0f8a78e4dfb18a7ba8959ef", sha)
+    }
+
+    /** What the reader makes of [bytes]: "ok <samples>", "short <n> of <declared>" (AudioDecoder refuses that too), or the error. */
+    private fun outcome(bytes: ByteArray): String = try {
+        val d = FlacDecoder(bytes.inputStream())
+        val ch = Array(d.info.channels) { IntArray(d.info.maxBlock) }
+        var n = 0L
+        while (true) {
+            val k = d.next(ch)
+            if (k == 0) break
+            n += k
+        }
+        if (d.info.totalSamples > 0 && n != d.info.totalSamples) "short $n of ${d.info.totalSamples}" else "ok $n"
+    } catch (e: Exception) {
+        "error ${e.javaClass.simpleName}: ${e.message}"
+    }
+
+    @Test
+    fun aCutOrDamagedFileIsNotReadAsWhole() {
+        // The app hands such a file to MediaCodec (AudioDecoder.decode) and says why in the report.
+        val whole = File("src/main/assets/examples/1284-1180-0000.flac").readBytes()
+        assertEquals("ok 129920", outcome(whole))
+        val cut = outcome(whole.copyOf(whole.size * 6 / 10)) // the first 60 %
+        assertTrue(cut, cut == "error FlacException: FLAC stream ends inside a frame" || cut.startsWith("short"))
+        val flipped = whole.copyOf().also { it[whole.size / 2] = (it[whole.size / 2].toInt() xor 0x10).toByte() } // one bit
+        val damaged = outcome(flipped)
+        assertTrue(damaged, damaged.startsWith("error") || damaged.startsWith("short"))
+        println("FLAC cut: $cut; one bit flipped: $damaged")
+    }
+
+    @Test
+    fun whichReaderAFileGoesTo() {
+        fun head(s: String) = s.toByteArray(Charsets.US_ASCII).copyOf(12)
+        val flac = head("fLaC")
+        val wav = head("RIFF0000WAVE")
+        val id3 = head("ID3")
+        val mp4 = head("0000ftypM4A ")
+        assertEquals(AudioDecoder.Path.FLAC, AudioDecoder.pathFor(flac, 12, "a.flac", AudioDecoder.Mode.FLAC))
+        assertEquals(AudioDecoder.Path.FLAC, AudioDecoder.pathFor(flac, 12, null, AudioDecoder.Mode.FLAC)) // by its marker, whatever the name
+        assertEquals(AudioDecoder.Path.FLAC, AudioDecoder.pathFor(id3, 12, "a.FLAC", AudioDecoder.Mode.FLAC))
+        assertEquals(AudioDecoder.Path.MEDIACODEC, AudioDecoder.pathFor(id3, 12, "a.mp3", AudioDecoder.Mode.FLAC))
+        assertEquals(AudioDecoder.Path.WAV, AudioDecoder.pathFor(wav, 12, "a.wav", AudioDecoder.Mode.FLAC))
+        assertEquals(AudioDecoder.Path.WAV, AudioDecoder.pathFor(wav, 12, "a.wav", AudioDecoder.Mode.SYNC))
+        assertEquals(AudioDecoder.Path.MEDIACODEC, AudioDecoder.pathFor(mp4, 12, "a.m4a", AudioDecoder.Mode.FLAC))
+        // The measurement modes send FLAC through MediaCodec too.
+        for (m in listOf(AudioDecoder.Mode.SYNC, AudioDecoder.Mode.ASYNC, AudioDecoder.Mode.LEGACY)) {
+            assertEquals(AudioDecoder.Path.MEDIACODEC, AudioDecoder.pathFor(flac, 12, "a.flac", m))
+        }
+        assertEquals(AudioDecoder.Path.MEDIACODEC, AudioDecoder.pathFor(flac, 3, "a.flac", AudioDecoder.Mode.FLAC)) // too short to tell
     }
 
     @Test

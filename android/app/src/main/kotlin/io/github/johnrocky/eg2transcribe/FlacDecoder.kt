@@ -5,9 +5,10 @@ import java.io.InputStream
 /**
  * A FLAC reader in Kotlin (the format of RFC 9639): STREAMINFO read and the other metadata skipped, then every frame
  * decoded (CONSTANT, VERBATIM, FIXED and LPC subframes, partitioned Rice residuals with 4- or 5-bit parameters and
- * escapes, wasted bits, the three stereo decorrelations) into one Int array per channel. It does not check the CRCs
- * (a frame that does not start with the sync code is an error) and cannot seek. It reads FLAC without MediaCodec,
- * whose trips between processes cost one round per FLAC frame (the decode mode `flac`, [AudioDecoder.Mode.FLAC]).
+ * escapes, wasted bits, the three stereo decorrelations) into one Int array per channel. Every frame's header CRC-8 and
+ * frame CRC-16 are checked; a frame without the sync code, a CRC that does not match or a stream that ends inside a
+ * frame is a [FlacException]. It cannot seek. It is the app's way to read FLAC ([AudioDecoder.Mode.FLAC]): MediaCodec
+ * costs about 3 ms of calls per FLAC frame on a Pixel 8a (409 s for a 54 min file, this reader 5 s).
  */
 class FlacDecoder(input: InputStream) {
     /** STREAMINFO: block sizes, rate, channels, bits per sample and the total samples per channel (0 = unknown). */
@@ -30,6 +31,7 @@ class FlacDecoder(input: InputStream) {
      */
     fun next(out: Array<IntArray>): Int {
         if (!r.skipToByteBoundary()) return 0
+        r.startCapture()
         val sync = r.bitsOrEnd(14) ?: return 0
         if (sync != 0x3FFE) throw FlacException("FLAC frame ${frames + 1}: no sync code (0x${Integer.toHexString(sync)})")
         r.bits(1) // reserved
@@ -62,7 +64,8 @@ class FlacDecoder(input: InputStream) {
             7 -> 32
             else -> throw FlacException("FLAC frame ${frames + 1}: reserved sample size code")
         }
-        r.bits(8) // CRC-8 of the header
+        val headerBytes = r.consumed()
+        if (r.bits(8) != Crc.crc8(r.captured(), headerBytes)) throw FlacException("FLAC frame ${frames + 1}: the header's CRC-8 does not match")
         val channels = if (chCode < 8) chCode + 1 else if (chCode <= 10) 2 else throw FlacException("FLAC frame ${frames + 1}: reserved channel code")
         if (channels > out.size) throw FlacException("FLAC frame ${frames + 1}: $channels channels, the reader was given ${out.size}")
         for (c in 0 until channels) {
@@ -89,9 +92,28 @@ class FlacDecoder(input: InputStream) {
             }
         }
         r.skipToByteBoundary()
-        r.bits(16) // CRC-16 of the frame
+        val frameBytes = r.consumed()
+        if (r.bits(16) != Crc.crc16(r.captured(), frameBytes)) throw FlacException("FLAC frame ${frames + 1}: the frame's CRC-16 does not match")
         frames++
         return blockSize
+    }
+
+    /** FLAC's CRCs: CRC-8 (polynomial 0x07) over a frame header, CRC-16 (0x8005) over a whole frame; both start at 0, MSB first. */
+    private object Crc {
+        private val T8 = IntArray(256) { i -> var c = i; repeat(8) { c = if (c and 0x80 != 0) (c shl 1) xor 0x07 else c shl 1 }; c and 0xff }
+        private val T16 = IntArray(256) { i -> var c = i shl 8; repeat(8) { c = if (c and 0x8000 != 0) (c shl 1) xor 0x8005 else c shl 1 }; c and 0xffff }
+
+        fun crc8(b: ByteArray, n: Int): Int {
+            var c = 0
+            for (i in 0 until n) c = T8[c xor (b[i].toInt() and 0xff)]
+            return c
+        }
+
+        fun crc16(b: ByteArray, n: Int): Int {
+            var c = 0
+            for (i in 0 until n) c = ((c shl 8) xor T16[(c ushr 8) xor (b[i].toInt() and 0xff)]) and 0xffff
+            return c
+        }
     }
 
     private fun subframe(s: IntArray, n: Int, bitsIn: Int) {
@@ -196,13 +218,19 @@ class FlacDecoder(input: InputStream) {
         return info ?: throw FlacException("FLAC stream without STREAMINFO")
     }
 
-    /** A big-endian bit reader over a stream, refilled 64 KB at a time. */
+    /**
+     * A big-endian bit reader over a stream, refilled 64 KB at a time. From [startCapture] (at a byte boundary) it keeps
+     * a copy of every byte of the frame, for the CRCs: [consumed] of them are read, the rest wait in the bit cache.
+     */
     private class Bits(private val input: InputStream) {
         private val buf = ByteArray(1 shl 16)
         private var pos = 0
         private var len = 0
         private var cache = 0L
         private var count = 0
+        private var cap = ByteArray(1 shl 16)
+        private var capLen = 0
+        private var capturing = false
 
         private fun byte(): Int {
             if (pos >= len) {
@@ -210,8 +238,26 @@ class FlacDecoder(input: InputStream) {
                 pos = 0
                 if (len <= 0) { len = 0; return -1 }
             }
-            return buf[pos++].toInt() and 0xff
+            val b = buf[pos++].toInt() and 0xff
+            if (capturing) {
+                if (capLen == cap.size) cap = cap.copyOf(cap.size * 2)
+                cap[capLen++] = b.toByte()
+            }
+            return b
         }
+
+        /** Starts the copy at the current byte boundary: the whole bytes still unread in the cache come first. */
+        fun startCapture() {
+            capLen = 0
+            capturing = true
+            val k = count / 8
+            for (i in k - 1 downTo 0) cap[capLen++] = ((cache ushr (8 * i)) and 0xff).toByte()
+        }
+
+        /** Bytes of the copy that are read (at a byte boundary). */
+        fun consumed(): Int = capLen - count / 8
+
+        fun captured(): ByteArray = cap
 
         /** [n] bits (0..32) as an unsigned value; the end of the stream inside them is an error. */
         fun bits(n: Int): Int {

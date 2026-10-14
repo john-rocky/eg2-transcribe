@@ -56,9 +56,10 @@ import org.json.JSONObject
  * --es report <name.json> writes the run report and --ez dump true also the per-token files. Settings: --es backend
  * cpu|gpu_fp32|gpu_default|npu, --es model <file> (either file of a _w30 / _w10 pair), --ei window_s 0|30|10 (0 = auto,
  * the default; the NPU always runs 10 s windows), --ei overlap <tokens>, --ef min_rms <rms>. Measurements only, not on
- * the screen: --es reader_precision fp32|fp16acc32 (the reader on a GPU), --es decode_mode sync|async|legacy (how a
- * compressed file is fed through MediaCodec), and --ez decode_only true with --es file: read the file, report where the
- * time went and stop (no model; --ei decode_cap_s <s> stops the read after that long).
+ * the screen: --es reader_precision fp32|fp16acc32 (the reader on a GPU), --es decode_mode flac|sync|async|legacy (flac,
+ * the default: FLAC files by the app's own reader, MediaCodec for the rest and as its fallback; the others send every
+ * compressed file through MediaCodec), and --ez decode_only true with --es file: read the file, report where the time
+ * went and stop (no model; --ei decode_cap_s <s> stops the read after that long).
  * A start with file or mic_ms shows over the lock screen and keeps the display on (a phone asleep behind a lock keeps
  * the app on its slow cores).
  *
