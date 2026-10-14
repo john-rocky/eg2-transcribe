@@ -148,6 +148,38 @@ class PipelineTest {
     }
 
     @Test
+    fun reportsEachCallsWriteRunAndRead() {
+        // The encoder's and the reader's write / run / read times, one value per window, for the run report.
+        val pcm = FloatPcm(FloatArray((5732 - 1) * 160 + 161))
+        val plan = WindowPlan(5732, 3000, 96)
+        val inner = FakeEncoder(plan, setOf(3000))
+        val enc = object : EncoderRunner {
+            override val windowSizes = inner.windowSizes
+            override fun run(frames: Int, mel: FloatArray, mask: FloatArray): EncoderOutput {
+                val o = inner.run(frames, mel, mask)
+                return EncoderOutput(o.soft, o.mask, 4.0, 1.0, 2.0, 1.0)
+            }
+        }
+        val reader = object : Reader {
+            override val name = "fake"
+            override val isStub = false
+            override val windowTokens = setOf(750)
+            override fun read(soft: FloatArray, tokens: Int, valid: Int, from: Int, until: Int): Read =
+                GraphRead(IntArray(tokens) { 1 }, FloatArray(tokens) { 10f }, FloatArray(tokens) { 9f }, 1, 1000, from, minOf(until, valid) - from)
+                    .also { it.writeMs = 0.5; it.runMs = 0.25; it.readMs = 0.75 }
+        }
+        val r = Pipeline(enc, reader, vocab, prep, decode).run(pcm, 3000, 96, object : Pipeline.Listener {})
+        assertEquals(listOf(1.0, 1.0, 1.0), r.calls.encoderWriteMs)
+        assertEquals(listOf(2.0, 2.0, 2.0), r.calls.encoderRunMs)
+        assertEquals(listOf(1.0, 1.0, 1.0), r.calls.encoderReadMs)
+        assertEquals(listOf(0.5, 0.5, 0.5), r.calls.readerWriteMs)
+        assertEquals(listOf(0.25, 0.25, 0.25), r.calls.readerRunMs)
+        assertEquals(listOf(0.75, 0.75, 0.75), r.calls.readerReadMs)
+        assertEquals(listOf("encoder_write_ms", "encoder_run_ms", "encoder_read_ms", "reader_write_ms", "reader_run_ms", "reader_read_ms"), r.calls.all().keys.toList())
+        assertEquals(listOf(4.0, 4.0, 4.0), r.encoderMs)
+    }
+
+    @Test
     fun aGraphReaderIsCalledOnTheWholeWindowAndKeepsTheKeptRange() {
         // A fake trained reader: it sees every window whole (750 tokens, the valid count), and its outputs give token
         // p of window k the word (firstToken(k) + p) % 5 + 1, blank where that is 3.

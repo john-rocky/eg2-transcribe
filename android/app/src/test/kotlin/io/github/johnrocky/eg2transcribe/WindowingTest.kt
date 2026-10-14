@@ -137,6 +137,43 @@ class WindowingTest {
         assertEquals(249 until 251, q.kept(1))
     }
 
+    @Test
+    fun autoPicksTheTenSecondFilesForOneWindowWithATokenToSpare() {
+        // 249 tokens = one 10 s window with its right-edge token free: the 10 s files; 250 fill the window: 30 s.
+        assertEquals(249, WindowPlan.AUTO_MAX_TOKENS_10S)
+        assertEquals(WindowPlan.FRAMES_10S, WindowPlan.autoFrames(249, has10s = true, has30s = true))
+        assertEquals(WindowPlan.FRAMES_30S, WindowPlan.autoFrames(250, has10s = true, has30s = true))
+        assertEquals(WindowPlan.FRAMES_10S, WindowPlan.autoFrames(1, has10s = true, has30s = true))
+        assertEquals(WindowPlan.FRAMES_30S, WindowPlan.autoFrames(81_436, has10s = true, has30s = true))
+        // In samples: 159,520 samples (9.97 s) = 996 frames = 249 tokens; one sample more starts frame 997 = token 250.
+        assertEquals(996, MelFrontEnd.frames(159_520))
+        assertEquals(249, WindowPlan.tokensFor(MelFrontEnd.frames(159_520)))
+        assertEquals(250, WindowPlan.tokensFor(MelFrontEnd.frames(159_521)))
+        // Without a 10 s file (the encoder's or the reader's) a short recording takes the 30 s files; without a 30 s
+        // file a long one takes the 10 s files (windows of 10 s), and with no file at all the answer is 30 s (the load
+        // then says what is missing).
+        assertEquals(WindowPlan.FRAMES_30S, WindowPlan.autoFrames(249, has10s = false, has30s = true))
+        assertEquals(WindowPlan.FRAMES_10S, WindowPlan.autoFrames(250, has10s = true, has30s = false))
+        assertEquals(WindowPlan.FRAMES_10S, WindowPlan.autoFrames(249, has10s = true, has30s = false))
+        assertEquals(WindowPlan.FRAMES_30S, WindowPlan.autoFrames(249, has10s = false, has30s = false))
+        // The 20 test-clean fixtures (reader/fixtures/MANIFEST.json n_samples): 11 fit one 10 s window, 9 do not.
+        val fixtures = mapOf(
+            "1089-134686-0000" to 166_960L, "1089-134686-0002" to 106_000L, "1188-133604-0000" to 171_600L, "1188-133604-0001" to 144_640L,
+            "121-121726-0000" to 135_360L, "121-121726-0001" to 94_800L, "1221-135766-0000" to 198_960L, "1221-135766-0001" to 267_440L,
+            "1284-1180-0000" to 129_920L, "1284-1180-0001" to 124_080L, "1320-122612-0000" to 215_680L, "1320-122612-0001" to 152_320L,
+            "1580-141083-0000" to 143_040L, "1580-141083-0001" to 164_080L, "1995-1826-0000" to 151_760L, "1995-1826-0001" to 162_720L,
+            "2094-142345-0001" to 128_480L, "2094-142345-0002" to 248_320L, "2300-131720-0000" to 81_280L, "2300-131720-0001" to 234_080L,
+        )
+        val short = fixtures.filterValues { WindowPlan.autoFrames(WindowPlan.tokensFor(MelFrontEnd.frames(it)), true, true) == WindowPlan.FRAMES_10S }.keys
+        assertEquals(11, short.size)
+        assertTrue("1284-1180-0000" in short) // the bundled example: 203 tokens
+        assertEquals(203, WindowPlan.tokensFor(MelFrontEnd.frames(129_920L)))
+        // A short recording in its 10 s window: one window that keeps every token.
+        val p = WindowPlan(MelFrontEnd.frames(129_920L), WindowPlan.FRAMES_10S, 96)
+        assertEquals(1, p.count)
+        assertEquals(0 until 203, p.kept(0))
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun overlapTooLarge() {
         WindowPlan(10_000, WindowPlan.FRAMES_10S, WindowPlan.maxOverlap(WindowPlan.FRAMES_10S) + 1)

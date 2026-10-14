@@ -13,9 +13,15 @@ object Session {
     // Settings.
     @Volatile var backend = Backend.GPU_FP32
     @Volatile var modelName = Engine.DEFAULT_MODEL
-    @Volatile var windowFrames = WindowPlan.FRAMES_30S
+
+    /** [WindowPlan.AUTO] (the default: 10 s files for a recording that fits one 10 s window, 30 s files otherwise), or a length in frames. */
+    @Volatile var windowFrames = WindowPlan.AUTO
     @Volatile var overlapTokens = WindowPlan.DEFAULT_OVERLAP
     @Volatile var minRms = Engine.MIN_RMS
+
+    /** Hidden settings (launch extras only): the reader's GPU precision, and how a compressed file is decoded. */
+    @Volatile var readerPrecision = ReaderPrecision.FP32
+    @Volatile var decodeMode = AudioDecoder.Mode.SYNC
 
     /** The recording harness (launch extras): the file picker's first folder, and a report for a file picked by hand. */
     @Volatile var pickerDir: String? = null
@@ -46,15 +52,22 @@ object Session {
     /** System.nanoTime() when the current model load started, 0 when none runs (the screen shows the time it takes). */
     @Volatile var loadingSince = 0L
 
-    /** The window length a run uses: the loaded encoder's when it has no file for the setting (the NPU: 10 s), else the setting. */
+    /**
+     * The window length a run on the loaded encoder uses for a fixed setting: the loaded encoder's when it has no file
+     * for the setting (the NPU: 10 s), else the setting; with "auto", the loaded encoder's length (or 10 s before a load).
+     */
     fun effectiveWindowFrames(): Int {
         val sizes = Engine.loaded?.encoder?.windowSizes
         return when {
             sizes != null -> if (windowFrames in sizes) windowFrames else sizes.max()
             backend == Backend.NPU -> WindowPlan.FRAMES_10S
+            windowFrames == WindowPlan.AUTO -> WindowPlan.FRAMES_10S
             else -> windowFrames
         }
     }
+
+    /** The last run's window and why it was picked (the screen's Windows row, after a run with "auto"). */
+    @Volatile var lastWindowNote: String? = null
 
     /** A decoded input kept for "Transcribe again": the PCM file and what it was. */
     class Input(val pcm: File, val label: String, val json: org.json.JSONObject)

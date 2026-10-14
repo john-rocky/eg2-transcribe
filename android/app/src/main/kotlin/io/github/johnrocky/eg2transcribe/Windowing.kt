@@ -72,10 +72,32 @@ class WindowPlan(val frames: Int, val windowFrames: Int, val overlapTokens: Int,
         const val DEFAULT_OVERLAP = 96
         const val DEFAULT_DROP_LAST = 1
 
+        /** The window setting "auto" (not a window length): each recording gets its length from [autoFrames]. */
+        const val AUTO = 0
+
+        /**
+         * The longest recording, in tokens, that "auto" reads with the 10 s files: one 10 s window with its right-edge
+         * token to spare (250 - 1 = 249 tokens = 9.96 s; the contract's token at the right of a window).
+         */
+        const val AUTO_MAX_TOKENS_10S = FRAMES_10S / 4 - DEFAULT_DROP_LAST
+
         /** Tokens the encoder marks valid for [frames] real frames: ceil(ceil(frames / 2) / 2). */
         fun tokensFor(frames: Int): Int = (frames + 3) / 4
 
         /** At most half a window of overlap (twice the encoder work). */
         fun maxOverlap(windowFrames: Int): Int = windowFrames / 8
+
+        /**
+         * The window length "auto" picks for a recording of [tokens] tokens: 10 s when the recording fits one 10 s window
+         * with its right-edge token to spare ([AUTO_MAX_TOKENS_10S]) and the 10 s files are there ([has10s]: the
+         * encoder's 10 s file and the reader's), else 30 s when the encoder has that file ([has30s]), else 10 s. A
+         * recording that needs more than one window always gets 30 s windows (fewer window edges).
+         */
+        fun autoFrames(tokens: Int, has10s: Boolean, has30s: Boolean): Int = when {
+            has10s && tokens <= AUTO_MAX_TOKENS_10S -> FRAMES_10S
+            has30s -> FRAMES_30S
+            has10s -> FRAMES_10S
+            else -> FRAMES_30S
+        }
     }
 }

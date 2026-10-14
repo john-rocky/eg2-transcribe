@@ -19,10 +19,15 @@ import org.junit.Test
  * computer and this code can be compared word by word without the encoder's numerics in between.
  *
  * Each subdirectory of <dir> holds `pcm16` (16 kHz 16-bit samples), `mel.f32` (the extractor's log-mel rows, float32
- * [frames, 128]), `plan.txt` (line 1: label samples frames window overlap; line 2: the frames of each encoder call)
- * and `soft.f32` / `mask.f32` (each call's encoder outputs, concatenated). The test checks the Kotlin log-mel of every
- * window against `mel.f32` (max |delta| <= 1e-3) and the calls' window sizes, and writes `jvm.json` (the run report
- * fields a comparison reads) with `jvm.tokens.bin` and `jvm.soft.f32` (the app's dump format).
+ * [frames, 128]), `plan.txt` (line 1: label samples frames window overlap, the window in frames or `auto`; line 2: the
+ * frames of each encoder call) and `soft.f32` / `mask.f32` (each call's encoder outputs, concatenated). The test checks
+ * the Kotlin log-mel of every window against `mel.f32` (max |delta| <= 1e-3) and the calls' window sizes, and writes
+ * `jvm.json` (the run report fields a comparison reads) with `jvm.tokens.bin` and `jvm.soft.f32` (the app's dump format).
+ *
+ * With `auto` the window comes from the app's own rule ([WindowPlan.autoFrames], both lengths' files present) and must
+ * be the one the computer used; the encoder then has that length only, as a `_w30` / `_w10` file does. With the reader
+ * graph's outputs of each call (`reader.ids.i32`, `reader.best.f32`, `reader.blank.f32`, T values per call) and
+ * `<dir>/vocab.txt`, the trained reader's labels replace the stub; with `expected.txt` the transcript must equal it.
  */
 class ReplayTest {
     private val root = System.getProperty("eg2.replay")?.let { File(it) }
@@ -33,14 +38,36 @@ class ReplayTest {
         val dirs = root!!.listFiles { f -> File(f, "plan.txt").isFile }!!.sortedBy { it.name }
         assertTrue("no replay inputs in $root", dirs.isNotEmpty())
         val vocab = WordTable.readVocab(File("src/main/assets/stub_vocab.txt"))
+        val readerVocab = File(root, "vocab.txt").takeIf { it.isFile }?.let { WordTable.readVocab(it) }
         val prep = Executors.newSingleThreadExecutor()
         val decode = Executors.newSingleThreadExecutor()
         val scan = Executors.newFixedThreadPool(4)
         try {
-            for (d in dirs) replayOne(d, vocab, prep, decode, scan)
+            for (d in dirs) replayOne(d, vocab, readerVocab, prep, decode, scan)
         } finally {
             prep.shutdown(); decode.shutdown(); scan.shutdown()
         }
+    }
+
+    /** The reader graph's outputs of each call, read back in call order (T = the call's tokens). */
+    private class ReplayReader(d: File, private val vocabSize: Int) : Reader {
+        override val name = "replay"
+        override val isStub = false
+        override val windowTokens: Set<Int> = emptySet()
+        private val ids = RandomAccessFile(File(d, "reader.ids.i32"), "r")
+        private val best = RandomAccessFile(File(d, "reader.best.f32"), "r")
+        private val blank = RandomAccessFile(File(d, "reader.blank.f32"), "r")
+
+        private fun bytes(raf: RandomAccessFile, n: Int): ByteBuffer = ByteBuffer.wrap(ByteArray(n * 4).also { raf.readFully(it) }).order(ByteOrder.LITTLE_ENDIAN)
+
+        override fun read(soft: FloatArray, tokens: Int, valid: Int, from: Int, until: Int): Read {
+            val i = IntArray(tokens).also { bytes(ids, tokens).asIntBuffer().get(it) }
+            val b = FloatArray(tokens).also { bytes(best, tokens).asFloatBuffer().get(it) }
+            val k = FloatArray(tokens).also { bytes(blank, tokens).asFloatBuffer().get(it) }
+            return GraphRead(i, b, k, 1, vocabSize, from, maxOf(0, minOf(until, valid) - from))
+        }
+
+        override fun close() { ids.close(); best.close(); blank.close() }
     }
 
     private fun floats(raf: RandomAccessFile, count: Int): FloatArray {
@@ -49,19 +76,24 @@ class ReplayTest {
         return FloatArray(count).also { f.get(it) }
     }
 
-    private fun replayOne(d: File, vocab: List<String>, prep: ExecutorService, decode: ExecutorService, scan: ExecutorService) {
+    private fun replayOne(d: File, stubVocab: List<String>, readerVocab: List<String>?, prep: ExecutorService, decode: ExecutorService, scan: ExecutorService) {
         val lines = File(d, "plan.txt").readLines()
         val (label, samples, frames, window, overlap) = lines[0].split(" ")
         val calls = lines[1].trim().split(" ").map { it.toInt() }
-        val plan = WindowPlan(frames.toInt(), window.toInt(), overlap.toInt())
+        val auto = window == "auto"
+        val windowFrames = if (auto) WindowPlan.autoFrames(WindowPlan.tokensFor(frames.toInt()), has10s = true, has30s = true) else window.toInt()
+        if (auto) assertEquals("${d.name}: the app's auto window", calls[0], windowFrames)
+        val plan = WindowPlan(frames.toInt(), windowFrames, overlap.toInt())
         assertEquals(plan.count, calls.size)
+        val graph = File(d, "reader.ids.i32").isFile && readerVocab != null
+        val vocab = if (graph) readerVocab!! else stubVocab
         val melRef = RandomAccessFile(File(d, "mel.f32"), "r")
         val soft = RandomAccessFile(File(d, "soft.f32"), "r")
         val maskRef = RandomAccessFile(File(d, "mask.f32"), "r")
         var maxAbs = 0.0
         val enc = object : EncoderRunner {
             var k = 0
-            override val windowSizes = setOf(WindowPlan.FRAMES_10S, WindowPlan.FRAMES_30S)
+            override val windowSizes = if (auto) setOf(windowFrames) else setOf(WindowPlan.FRAMES_10S, WindowPlan.FRAMES_30S)
 
             override fun run(frames: Int, mel: FloatArray, mask: FloatArray): EncoderOutput {
                 assertEquals("window $k frames", calls[k], frames)
@@ -78,26 +110,31 @@ class ReplayTest {
         val tokens = BufferedOutputStream(FileOutputStream("$stem.tokens.bin"), 1 shl 16)
         val softOut = BufferedOutputStream(FileOutputStream("$stem.soft.f32"), 1 shl 20)
         val src = Pcm16File(File(d, "pcm16"))
+        val reader = if (graph) ReplayReader(d, vocab.size) else Stub.reader(vocab, scan, 4)
         val t0 = System.nanoTime()
         val r = try {
-            Pipeline(enc, Stub.reader(vocab, scan, 4), vocab, prep, decode).run(src, plan.windowFrames, plan.overlapTokens, object : Pipeline.Listener {}, dump = Pipeline.Dump(softOut, tokens))
+            Pipeline(enc, reader, vocab, prep, decode).run(src, plan.windowFrames, plan.overlapTokens, object : Pipeline.Listener {}, dump = Pipeline.Dump(softOut, tokens))
         } finally {
-            tokens.close(); softOut.close(); src.close(); melRef.close(); soft.close(); maskRef.close()
+            tokens.close(); softOut.close(); src.close(); melRef.close(); soft.close(); maskRef.close(); reader.close()
         }
         val ms = (System.nanoTime() - t0) / 1e6
         assertEquals(samples.toLong(), src.length)
         assertTrue(r.warnings.toString(), r.warnings.isEmpty())
         assertEquals(calls, r.windowFrames)
         val text = r.words.joinToString(" ") { it.text }
+        val expected = File(d, "expected.txt").takeIf { it.isFile }?.readText()?.trim()
         File("$stem.json").writeText(
             "{\"status\": \"ok\", \"input\": {\"label\": \"$label\", \"samples\": $samples}, \"backend\": {\"used\": \"replay\"}, " +
-                "\"window\": {\"frames\": ${plan.windowFrames}, \"overlap_tokens\": ${plan.overlapTokens}, \"count\": ${plan.count}, " +
+                "\"window\": {\"frames\": ${plan.windowFrames}, \"setting\": \"${if (auto) "auto" else "fixed"}\", \"overlap_tokens\": ${plan.overlapTokens}, \"count\": ${plan.count}, " +
                 "\"run\": ${r.encoderMs.size}, \"frames_per_call\": [${r.windowFrames.joinToString(", ")}]}, " +
+                "\"reader\": \"${if (graph) "graph outputs" else "stub"}\", \"transcript_equal_expected\": ${expected?.let { it == text }}, " +
                 "\"tokens\": ${plan.tokens}, \"blanks\": ${r.blanks}, \"words\": ${r.words.size}, \"mel_max_abs\": $maxAbs, " +
                 "\"transcript\": \"${text.replace("\\", "\\\\").replace("\"", "\\\"")}\"}\n",
         )
-        println("REPLAY ${d.name} label=$label windows=${plan.count} tokens=${plan.tokens} words=${r.words.size} blanks=${r.blanks} mel_max_abs=${"%.3e".format(maxAbs)} ms=${"%.0f".format(ms)}")
+        println("REPLAY ${d.name} label=$label window=${plan.windowFrames}${if (auto) " (auto)" else ""} windows=${plan.count} tokens=${plan.tokens} words=${r.words.size} blanks=${r.blanks} " +
+            "reader=${if (graph) "graph" else "stub"} expected=${expected?.let { if (it == text) "equal" else "DIFF" } ?: "-"} mel_max_abs=${"%.3e".format(maxAbs)} ms=${"%.0f".format(ms)}")
         assertTrue("${d.name}: log-mel max |delta| $maxAbs > 1e-3", maxAbs <= 1e-3)
+        if (expected != null) assertEquals("${d.name}: transcript", expected, text)
         val cont = File(d, "continuous.f32")
         if (cont.isFile) checkWindowEdges(d.name, plan, File("$stem.soft.f32"), cont)
     }

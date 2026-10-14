@@ -26,8 +26,16 @@ interface Reader : Closeable {
     override fun close() {}
 }
 
-/** One window's reader results for its kept tokens, [n] of them. */
+/**
+ * One window's reader results for its kept tokens, [n] of them. A graph reader also says how its call was spent:
+ * [writeMs] = the window into the input buffers, [runMs] = the graph's run call, [readMs] = the outputs back (on a GPU
+ * the run call can return before the work is done, and the read then waits for it); all 0 for the stub.
+ */
 abstract class Read(val n: Int) {
+    var writeMs = 0.0
+    var runMs = 0.0
+    var readMs = 0.0
+
     /**
      * Fills, per token: [ids] = a word (the vocabulary's line) or [Ctc.BLANK]; [word] = the best word even where the token
      * is blank; [best] = that word's score; [blank] = the blank's score (a token is blank when blank > best).

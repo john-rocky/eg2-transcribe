@@ -83,6 +83,8 @@ object Engine {
         /** The window length (frames) this set was picked for, and the files it was picked from (name -> bytes). */
         val windowFrames: Int,
         val key: List<Pair<String, Long>>,
+        /** The GPU precision asked for (fp32 unless a launch extra set another). */
+        val precision: ReaderPrecision = ReaderPrecision.FP32,
     ) {
         val tflite: TfliteReader? get() = reader as? TfliteReader
     }
@@ -109,15 +111,15 @@ object Engine {
      * CPU when it cannot compile or run it), or the stub with the reason in [ReaderSet.note] when the files are not
      * all there or cannot be used. Kept while the files, the accelerator and the window length stay the same.
      */
-    fun ensureReader(context: Context, backend: Backend, windowFrames: Int, onStage: (String) -> Unit = {}): ReaderSet {
+    fun ensureReader(context: Context, backend: Backend, windowFrames: Int, precision: ReaderPrecision = ReaderPrecision.FP32, onStage: (String) -> Unit = {}): ReaderSet {
         val dir = readerDir(context)
         val key = readerKey(dir)
-        readers?.takeIf { current(it, key, backend, windowFrames) }?.let { return it }
+        readers?.takeIf { current(it, key, backend, windowFrames, precision) }?.let { return it }
         closeReader()
-        return loadReader(context, dir, key, backend, windowFrames, onStage).also { readers = it }
+        return loadReader(context, dir, key, backend, windowFrames, precision, onStage).also { readers = it }
     }
 
-    private fun loadReader(context: Context, dir: File, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int, onStage: (String) -> Unit): ReaderSet {
+    private fun loadReader(context: Context, dir: File, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int, precision: ReaderPrecision, onStage: (String) -> Unit): ReaderSet {
         val vocabFile = File(dir, "vocab.txt")
         val file = TfliteReader.fileFor(dir, windowFrames)
         var why = "no trained reader in files/reader/"
@@ -133,7 +135,7 @@ object Engine {
                     val want = readerBackend(backend)
                     onStage("Compiling the reader for ${want.label}…")
                     val r = try {
-                        TfliteReader.open(context, file!!, want, vocab.size, CPU_THREADS)
+                        TfliteReader.open(context, file!!, want, vocab.size, CPU_THREADS, precision)
                     } catch (e: EncoderException) {
                         if (!want.isGpu || e.code !in setOf("compile_failed", "run_failed", "not_finite")) throw e
                         fallback = "${e.text}. The reader runs on the CPU instead."
@@ -141,9 +143,10 @@ object Engine {
                         onStage("Compiling the reader for the CPU…")
                         TfliteReader.open(context, file!!, Backend.CPU, vocab.size, CPU_THREADS)
                     }
-                    Log.i(TAG, "READER file=${r.file.name} bytes=${r.file.length()} backend=${r.backend.id} tokens=${r.tokens} slices=${r.slices} words=${vocab.size} compile_ms=${Jobs.fmt(r.compileMs)} warmup_ms=${Jobs.fmt(r.warmupMs)} fallback=${fallback != null}")
-                    val note = "Reader v1 on ${r.backend.label} · ${r.file.name} (${megabytes(r.file.length())}) · ${"%,d".format(java.util.Locale.US, vocab.size)} words"
-                    return ReaderSet(r, vocab, note, want, fallback, windowFrames, key)
+                    Log.i(TAG, "READER file=${r.file.name} bytes=${r.file.length()} backend=${r.backend.id} precision=${r.precision} tokens=${r.tokens} slices=${r.slices} words=${vocab.size} compile_ms=${Jobs.fmt(r.compileMs)} warmup_ms=${Jobs.fmt(r.warmupMs)} fallback=${fallback != null}")
+                    val note = "Reader v1 on ${r.backend.label}" + (if (r.precision == ReaderPrecision.FP16_ACC32.id) " (fp16, fp32 accumulation)" else "") +
+                        " · ${r.file.name} (${megabytes(r.file.length())}) · ${"%,d".format(java.util.Locale.US, vocab.size)} words"
+                    return ReaderSet(r, vocab, note, want, fallback, windowFrames, key, precision)
                 } catch (e: Throwable) {
                     why = "files/reader/ could not be used: ${e.message}"
                     Log.w(TAG, "READER_FALLBACK $why", e)
@@ -155,16 +158,19 @@ object Engine {
         val vocab = context.assets.open("stub_vocab.txt").bufferedReader().readLines().map { it.trim() }.filter { it.isNotEmpty() }
         Log.i(TAG, "READER stub words=${vocab.size} ($why)")
         val scanThreads = if (backend == Backend.CPU) 2 else SCAN_THREADS
-        return ReaderSet(Stub.reader(vocab, scan, scanThreads), vocab, "Stub reader: the words are placeholders ($why)", readerBackend(backend), null, windowFrames, key)
+        return ReaderSet(Stub.reader(vocab, scan, scanThreads), vocab, "Stub reader: the words are placeholders ($why)", readerBackend(backend), null, windowFrames, key, precision)
     }
 
-    /** The same files, accelerator and window length: a reader (or a stub after a failed load) is not loaded again. */
-    private fun current(r: ReaderSet, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int): Boolean =
-        r.key == key && r.requested == readerBackend(backend) && r.windowFrames == windowFrames
+    /** The same files, accelerator, window length and precision: a reader (or a stub after a failed load) is not loaded again. */
+    private fun current(r: ReaderSet, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int, precision: ReaderPrecision): Boolean =
+        r.key == key && r.requested == readerBackend(backend) && r.windowFrames == windowFrames && r.precision == precision
 
     /** True when [ensureReader] would return the loaded reader without work. */
-    fun isReaderLoaded(context: Context, backend: Backend, windowFrames: Int): Boolean =
-        readers?.let { current(it, readerKey(readerDir(context)), backend, windowFrames) } ?: false
+    fun isReaderLoaded(context: Context, backend: Backend, windowFrames: Int, precision: ReaderPrecision = ReaderPrecision.FP32): Boolean =
+        readers?.let { current(it, readerKey(readerDir(context)), backend, windowFrames, precision) } ?: false
+
+    /** True when files/reader/ has the reader file of that window length itself (not a longer one that pads). */
+    fun hasReaderFile(context: Context, windowFrames: Int): Boolean = TfliteReader.FILES[windowFrames]?.let { File(readerDir(context), it).isFile } ?: false
 
     fun closeReader() {
         val r = readers ?: return

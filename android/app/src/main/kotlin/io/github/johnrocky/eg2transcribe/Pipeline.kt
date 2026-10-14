@@ -18,8 +18,12 @@ interface EncoderRunner {
     fun run(frames: Int, mel: FloatArray, mask: FloatArray): EncoderOutput
 }
 
-/** [ms] = writing the inputs + run + reading the outputs (a GPU run returns before the work; the read waits for it). */
-class EncoderOutput(val soft: FloatArray, val mask: FloatArray, val ms: Double)
+/**
+ * [ms] = writing the inputs + run + reading the outputs, split as [writeMs] (mel and mask into the input buffers),
+ * [runMs] (the run call) and [readMs] (the soft tokens and their mask back; a GPU run can return before the work is
+ * done, and the read then waits for it).
+ */
+class EncoderOutput(val soft: FloatArray, val mask: FloatArray, val ms: Double, val writeMs: Double = 0.0, val runMs: Double = 0.0, val readMs: Double = 0.0)
 
 /**
  * PCM to words, window by window ([WindowPlan]): the log-mel of window k + 1 is computed on [prep] while the encoder
@@ -44,6 +48,25 @@ class Pipeline(
     /** Optional per-token outputs for checking a run against another pipeline. */
     class Dump(val soft: OutputStream?, val tokens: OutputStream?)
 
+    /**
+     * Per window, how each call was spent ([EncoderOutput], [Read]): the encoder's input write / run / output read and
+     * the reader's (its write includes padding the window into its buffer; its read is the ids and the two scores).
+     */
+    class Calls {
+        val encoderWriteMs = ArrayList<Double>()
+        val encoderRunMs = ArrayList<Double>()
+        val encoderReadMs = ArrayList<Double>()
+        val readerWriteMs = ArrayList<Double>()
+        val readerRunMs = ArrayList<Double>()
+        val readerReadMs = ArrayList<Double>()
+
+        /** Name (as in the run report) to values. */
+        fun all(): Map<String, List<Double>> = linkedMapOf(
+            "encoder_write_ms" to encoderWriteMs, "encoder_run_ms" to encoderRunMs, "encoder_read_ms" to encoderReadMs,
+            "reader_write_ms" to readerWriteMs, "reader_run_ms" to readerRunMs, "reader_read_ms" to readerReadMs,
+        )
+    }
+
     class Result(
         val plan: WindowPlan,
         val words: List<Word>,
@@ -56,6 +79,7 @@ class Pipeline(
         val cancelled: Boolean,
         val blanks: Int,
         val warnings: List<String>,
+        val calls: Calls = Calls(),
     )
 
     fun run(pcm: PcmSource, windowFrames: Int, overlapTokens: Int, listener: Listener, cancel: () -> Boolean = { false }, dump: Dump? = null): Result {
@@ -67,6 +91,7 @@ class Pipeline(
         val warnings = ArrayList<String>()
         val encoderMs = ArrayList<Double>()
         val readerMs = ArrayList<Double>()
+        val calls = Calls()
         val usedFrames = ArrayList<Int>()
         var melNs = 0L
         var decodeNs = 0L
@@ -141,6 +166,9 @@ class Pipeline(
                 val mask = if (frames == windowFrames) masks[slot] else masks[slot].copyOf(frames)
                 val out = encoder.run(frames, mel, mask)
                 encoderMs += out.ms
+                calls.encoderWriteMs += out.writeMs
+                calls.encoderRunMs += out.runMs
+                calls.encoderReadMs += out.readMs
                 usedFrames += frames
                 var valid = 0
                 for (i in 0 until frames / 4) if (out.mask[i] > 0.5f) valid++
@@ -152,6 +180,9 @@ class Pipeline(
                 val r0 = System.nanoTime()
                 val read = reader.read(out.soft, frames / 4, valid, plan.keepFrom(k), plan.keepUntil(k))
                 readerMs += (System.nanoTime() - r0) / 1e6
+                calls.readerWriteMs += read.writeMs
+                calls.readerRunMs += read.runMs
+                calls.readerReadMs += read.readMs
                 while (pending.size >= 2) pending.removeFirst().get() // bounded queue: at most 2 windows wait for decoding
                 pending.addLast(decode.submit { decodeWindow(k, read, out.soft) })
                 val done = plan.kept(k).last + 1
@@ -166,7 +197,7 @@ class Pipeline(
         dump?.soft?.flush()
         dump?.tokens?.flush()
         val elapsed = (System.nanoTime() - t0) / 1e6
-        return Result(plan, words, encoderMs, readerMs, usedFrames, melNs / 1e6, decodeNs / 1e6, elapsed, cancelled, blanks, warnings)
+        return Result(plan, words, encoderMs, readerMs, usedFrames, melNs / 1e6, decodeNs / 1e6, elapsed, cancelled, blanks, warnings, calls)
     }
 
     companion object {

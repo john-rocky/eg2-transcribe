@@ -6,13 +6,21 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
+import org.json.JSONObject
 
 /**
  * An audio file to 16 kHz mono 16-bit PCM in a file ([Pcm16File] reads it). WAV (PCM 8/16/24/32-bit or float) is read
@@ -25,19 +33,150 @@ object AudioDecoder {
      * [expectedSamples]: the length the file declares (WAV: its data size; others: the track duration), at 16 kHz, or
      * null when it declares none. A decoder that returns fewer samples shows up as the difference (the Galaxy S26's
      * FLAC decoder returned the 54 min fixture 998 samples short in an earlier build: the file's last 3 FLAC frames,
-     * which are 402 + 402 + 194 samples long).
+     * which are 402 + 402 + 194 samples long). [stats]: where the time went ([Stats.json]).
      */
-    class Decoded(val samples: Long, val sourceRate: Int, val channels: Int, val format: String, val resampled: Boolean, val ms: Double, val expectedSamples: Long?)
+    class Decoded(val samples: Long, val sourceRate: Int, val channels: Int, val format: String, val resampled: Boolean, val ms: Double, val expectedSamples: Long?, val stats: JSONObject)
 
     class DecodeException(text: String, cause: Throwable? = null) : Exception(text, cause)
 
-    fun decode(context: Context, uri: Uri, out: File, cancel: () -> Boolean = { false }, progress: (Double) -> Unit = {}): Decoded {
+    /** How a compressed file is fed through MediaCodec (the default is [SYNC]; the others are kept to measure against it). */
+    enum class Mode(val id: String, val label: String) {
+        /** One thread: every free input buffer filled, every ready output buffer drained, a wait (10 ms) only when neither moved. */
+        SYNC("sync", "sync loop"),
+
+        /** MediaCodec's callbacks on a thread of their own: a buffer is filled or drained the moment the codec offers it. */
+        ASYNC("async", "async callbacks"),
+
+        /** The loop of the builds before this one: free inputs filled, then one output buffer a turn, a 5 ms wait after an empty poll. */
+        LEGACY("legacy", "earlier loop"),
+
+        /** A FLAC file read by [FlacDecoder] in this process, without MediaExtractor and MediaCodec (other files: [SYNC]). */
+        FLAC("flac", "Kotlin FLAC reader");
+
+        companion object {
+            fun parse(s: String?): Mode? = entries.firstOrNull { it.id == s?.lowercase() }
+        }
+    }
+
+    /**
+     * Where a decode's time went, summed over the whole file (nanoseconds; the report gives ms): the extractor's
+     * readSampleData + advance, queueInputBuffer, dequeueInputBuffer, dequeueOutputBuffer without a wait, the waits,
+     * the samples out (to mono floats and into the PCM file), releaseOutputBuffer; and a time line ([curve]: every 2 s
+     * the output buffers, samples and source position so far), to tell a constant rate from one that falls.
+     */
+    class Stats(val mode: String) {
+        var readNs = 0L; var queueInNs = 0L; var dequeueInNs = 0L; var dequeueOutNs = 0L; var waitNs = 0L
+        var convertNs = 0L; var releaseNs = 0L
+
+        /** [Mode.FLAC]: reading and decoding the frames in Kotlin (the MediaCodec stages stay 0). */
+        var flacNs = 0L
+        var inputs = 0; var outputs = 0; var emptyPolls = 0; var waits = 0; var formatChanges = 0; var maxInFlight = 0
+        var capped = false
+        var sourcePositionUs = 0L
+        var codec: String? = null
+        var codecSoftware: Boolean? = null
+        val curve = ArrayList<DoubleArray>()
+        private val t0 = System.nanoTime()
+        private var lastPoint = 0L
+
+        fun inFlight() { maxInFlight = maxOf(maxInFlight, inputs - outputs) }
+
+        /** Adds a time-line point when 2 s passed since the last one (or [force]). */
+        fun point(samples: Long, force: Boolean = false) {
+            val now = System.nanoTime()
+            if (!force && now - lastPoint < 2_000_000_000L) return
+            lastPoint = now
+            curve += doubleArrayOf((now - t0) / 1e6, outputs.toDouble(), samples.toDouble(), sourcePositionUs / 1000.0)
+        }
+
+        fun json(): JSONObject = JSONObject().apply {
+            put("mode", mode)
+            codec?.let { put("codec", it) }
+            codecSoftware?.let { put("codec_software_only", it) }
+            for ((k, v) in listOf("read_ms" to readNs, "queue_in_ms" to queueInNs, "dequeue_in_ms" to dequeueInNs, "dequeue_out_ms" to dequeueOutNs,
+                "wait_ms" to waitNs, "convert_ms" to convertNs, "release_ms" to releaseNs)) put(k, v / 1e6)
+            if (flacNs > 0) put("flac_decode_ms", flacNs / 1e6)
+            put("inputs", inputs); put("outputs", outputs); put("empty_polls", emptyPolls); put("waits", waits)
+            put("format_changes", formatChanges); put("max_in_flight", maxInFlight)
+            put("capped", capped); put("source_position_s", sourcePositionUs / 1e6)
+            put("curve_fields", "elapsed_ms, output_buffers, samples, source_position_ms")
+            put("curve", org.json.JSONArray().apply { for (p in curve) put(org.json.JSONArray().apply { p.forEach { put(it) } }) })
+        }
+    }
+
+    /**
+     * Decodes [uri] to [out]. [mode]: how MediaCodec is driven (not used for WAV); [capMs]: stop after that much time and
+     * keep what was decoded (the decode probe; [Stats.capped]).
+     */
+    fun decode(context: Context, uri: Uri, out: File, cancel: () -> Boolean = { false }, mode: Mode = Mode.SYNC, capMs: Long? = null, progress: (Double) -> Unit = {}): Decoded {
         val t = System.nanoTime()
         val head = ByteArray(12)
         val n = context.contentResolver.openInputStream(uri)?.use { readFully(it, head) } ?: throw DecodeException("The file could not be opened.")
         val isWav = n == 12 && String(head, 0, 4, Charsets.US_ASCII) == "RIFF" && String(head, 8, 4, Charsets.US_ASCII) == "WAVE"
-        val r = if (isWav) decodeWav(context, uri, out, cancel, progress) else decodeMedia(context, uri, out, cancel, progress)
-        return Decoded(r.samples, r.sourceRate, r.channels, r.format, r.resampled, (System.nanoTime() - t) / 1e6, r.expectedSamples)
+        val isFlac = n >= 4 && String(head, 0, 4, Charsets.US_ASCII) == "fLaC"
+        val media = if (mode == Mode.FLAC && !isFlac) Mode.SYNC else mode
+        val stats = Stats(if (isWav) "wav" else media.id)
+        val deadline = capMs?.let { t + it * 1_000_000L }
+        val r = when {
+            isWav -> decodeWav(context, uri, out, cancel, progress)
+            media == Mode.FLAC -> decodeFlac(context, uri, out, cancel, progress, stats, deadline)
+            else -> decodeMedia(context, uri, out, cancel, progress, media, stats, deadline)
+        }
+        return Decoded(r.samples, r.sourceRate, r.channels, r.format, r.resampled, (System.nanoTime() - t) / 1e6, r.expectedSamples, stats.json())
+    }
+
+    /** [Mode.FLAC]: the frames decoded by [FlacDecoder], channels averaged, into the same PCM file as MediaCodec's path. */
+    private fun decodeFlac(context: Context, uri: Uri, out: File, cancel: () -> Boolean, progress: (Double) -> Unit, st: Stats, deadline: Long?): Result {
+        val input = context.contentResolver.openInputStream(uri) ?: throw DecodeException("The file could not be opened.")
+        input.use { s ->
+            fun bad(e: FlacDecoder.FlacException) = DecodeException("This FLAC file could not be read (${e.message}).", e)
+            val d = try { FlacDecoder(s) } catch (e: FlacDecoder.FlacException) { throw bad(e) }
+            val info = d.info
+            st.codec = "kotlin flac ${info.bitsPerSample}-bit ${info.channels} ch ${info.sampleRate} Hz"
+            val ch = Array(info.channels) { IntArray(maxOf(info.maxBlock, 1)) }
+            var mono = FloatArray(0)
+            val scale = 1f / (1 shl (info.bitsPerSample - 1))
+            var decoded = 0L
+            var lastProgress = -1.0
+            Sink(out, info.sampleRate).use { sink ->
+                while (true) {
+                    if (cancel()) throw DecodeException("cancelled")
+                    if (deadline != null && System.nanoTime() > deadline) { st.capped = true; break }
+                    var t = System.nanoTime()
+                    val n = try { d.next(ch) } catch (e: FlacDecoder.FlacException) { throw bad(e) }
+                    st.flacNs += System.nanoTime() - t
+                    if (n == 0) break
+                    t = System.nanoTime()
+                    if (mono.size < n) mono = FloatArray(n)
+                    val c = info.channels
+                    if (c == 1) {
+                        val x = ch[0]
+                        for (i in 0 until n) mono[i] = x[i] * scale
+                    } else {
+                        for (i in 0 until n) {
+                            var acc = 0f
+                            for (k in 0 until c) acc += ch[k][i] * scale
+                            mono[i] = acc / c
+                        }
+                    }
+                    sink.push(mono, n)
+                    st.convertNs += System.nanoTime() - t
+                    st.inputs++; st.outputs++
+                    decoded += n
+                    st.sourcePositionUs = decoded * 1_000_000L / info.sampleRate
+                    st.point(sink.written)
+                    if (info.totalSamples > 0) {
+                        val f = decoded.toDouble() / info.totalSamples
+                        if (f - lastProgress >= 0.005) { progress(f); lastProgress = f }
+                    }
+                }
+                sink.close()
+                st.point(sink.written, force = true)
+                progress(1.0)
+                val expected = if (info.totalSamples > 0) at16k(info.totalSamples, info.sampleRate) else null
+                return Result(sink.written, info.sampleRate, info.channels, "audio/flac", sink.resampled, expected)
+            }
+        }
     }
 
     private fun readFully(s: InputStream, b: ByteArray): Int {
@@ -166,7 +305,7 @@ object AudioDecoder {
         return k
     }
 
-    private fun decodeMedia(context: Context, uri: Uri, out: File, cancel: () -> Boolean, progress: (Double) -> Unit): Result {
+    private fun decodeMedia(context: Context, uri: Uri, out: File, cancel: () -> Boolean, progress: (Double) -> Unit, mode: Mode, st: Stats, deadline: Long?): Result {
         val ex = MediaExtractor()
         try {
             try {
@@ -185,90 +324,225 @@ object AudioDecoder {
             } catch (e: Exception) {
                 throw DecodeException("This phone has no decoder for $mime.", e)
             }
-            var rate = inFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-            var channels = inFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-            var encoding = AudioFormat.ENCODING_PCM_16BIT
-            var sink: Sink? = null
+            st.codec = runCatching { codec.name }.getOrNull()
+            if (Build.VERSION.SDK_INT >= 29) st.codecSoftware = runCatching { codec.codecInfo.isSoftwareOnly }.getOrNull()
+            val run = MediaRun(codec, ex, out, inFormat, durationUs, st, progress)
             try {
-                codec.configure(inFormat, null, null, 0)
-                codec.start()
-                val info = MediaCodec.BufferInfo()
-                var inputDone = false
-                var mono = FloatArray(0)
-                var lastProgress = -1.0
-                // Every free input buffer is filled and every ready output buffer drained before the loop waits (5 ms, only
-                // when nothing came out). One buffer in and a 10 ms wait for one buffer out per turn read the 54 min FLAC
-                // fixture in 616 s on a Galaxy S26 (5.3 x real time, the app at 23 % of one core).
-                var waitUs = 0L
-                while (true) {
-                    if (cancel()) throw DecodeException("cancelled")
-                    while (!inputDone) {
-                        val i = codec.dequeueInputBuffer(0)
-                        if (i < 0) break
-                        val buf = codec.getInputBuffer(i)!!
-                        val size = ex.readSampleData(buf, 0)
-                        if (size < 0) {
-                            codec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            inputDone = true
-                        } else {
-                            codec.queueInputBuffer(i, 0, size, ex.sampleTime, 0)
-                            if (durationUs > 0) {
-                                val f = ex.sampleTime.toDouble() / durationUs
-                                if (f - lastProgress >= 0.005) { progress(f); lastProgress = f }
-                            }
-                            ex.advance()
-                        }
+                when (mode) {
+                    Mode.ASYNC -> run.async(cancel, deadline)
+                    Mode.SYNC, Mode.LEGACY, Mode.FLAC -> {
+                        codec.configure(inFormat, null, null, 0)
+                        codec.start()
+                        if (mode == Mode.LEGACY) run.legacy(cancel, deadline) else run.sync(cancel, deadline)
                     }
-                    val o = codec.dequeueOutputBuffer(info, waitUs)
-                    if (o == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                        waitUs = 5_000
-                        continue
-                    }
-                    waitUs = 0
-                    if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                        val f = codec.outputFormat
-                        rate = f.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                        channels = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                        if (f.containsKey(MediaFormat.KEY_PCM_ENCODING)) encoding = f.getInteger(MediaFormat.KEY_PCM_ENCODING)
-                        continue
-                    }
-                    if (o < 0) continue
-                    val buf = codec.getOutputBuffer(o)!!.order(ByteOrder.LITTLE_ENDIAN)
-                    buf.position(info.offset)
-                    buf.limit(info.offset + info.size)
-                    val s = sink ?: Sink(out, rate).also { sink = it }
-                    val bytesPer = when (encoding) {
-                        AudioFormat.ENCODING_PCM_FLOAT -> 4
-                        AudioFormat.ENCODING_PCM_8BIT -> 1
-                        else -> 2
-                    }
-                    val frames = info.size / (bytesPer * channels)
-                    if (mono.size < frames) mono = FloatArray(frames)
-                    for (fr in 0 until frames) {
-                        var acc = 0f
-                        for (c in 0 until channels) acc += when (encoding) {
-                            AudioFormat.ENCODING_PCM_FLOAT -> buf.float
-                            AudioFormat.ENCODING_PCM_8BIT -> ((buf.get().toInt() and 0xff) - 128) / 128f
-                            else -> buf.short / 32768f
-                        }
-                        mono[fr] = if (channels == 1) acc else acc / channels
-                    }
-                    s.push(mono, frames)
-                    codec.releaseOutputBuffer(o, false)
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
                 }
-                val s = sink ?: throw DecodeException("The decoder gave no audio for this file.")
+                run.stopCodec()
+                val s = run.sink ?: throw DecodeException("The decoder gave no audio for this file.")
                 s.close()
+                st.point(s.written, force = true)
                 progress(1.0)
                 val expected = if (durationUs > 0) Math.round(durationUs * MelFrontEnd.SAMPLE_RATE / 1e6) else null
-                return Result(s.written, rate, channels, mime, s.resampled, expected)
+                return Result(s.written, run.rate, run.channels, mime, s.resampled, expected)
             } finally {
-                runCatching { sink?.close() }
-                runCatching { codec.stop() }
+                run.stopCodec()
+                runCatching { run.sink?.close() }
                 codec.release()
             }
         } finally {
             ex.release()
+        }
+    }
+
+    /** The sync loop's wait when neither an input nor an output buffer moved (it returns as soon as an output is ready). */
+    private const val WAIT_US = 10_000L
+
+    /**
+     * One MediaCodec decode of an extracted track into the PCM file: the output format as the codec reports it, and
+     * the three ways to drive the codec ([Mode]). Everything runs on one thread, the caller's (sync, legacy) or the
+     * callback thread (async), which is stopped before the caller reads the result.
+     */
+    private class MediaRun(
+        val codec: MediaCodec, val ex: MediaExtractor, val file: File, val inFormat: MediaFormat, val durationUs: Long,
+        val st: Stats, val progress: (Double) -> Unit,
+    ) {
+        var rate = inFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        var channels = inFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+        var encoding = AudioFormat.ENCODING_PCM_16BIT
+        var sink: Sink? = null
+        private var mono = FloatArray(0)
+        private var lastProgress = -1.0
+        private var inputDone = false
+        private var thread: HandlerThread? = null
+        private val stopped = AtomicBoolean(false)
+
+        /** Fills input buffer [i] with the extractor's next sample, or marks the end of the stream. */
+        fun feed(i: Int) {
+            val buf = codec.getInputBuffer(i)!!
+            var t = System.nanoTime()
+            val size = ex.readSampleData(buf, 0)
+            val time = ex.sampleTime
+            st.readNs += System.nanoTime() - t
+            t = System.nanoTime()
+            if (size < 0) {
+                codec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                inputDone = true
+            } else {
+                codec.queueInputBuffer(i, 0, size, time, 0)
+            }
+            st.queueInNs += System.nanoTime() - t
+            st.inputs++
+            st.inFlight()
+            if (size < 0) return
+            t = System.nanoTime()
+            ex.advance()
+            st.readNs += System.nanoTime() - t
+            st.sourcePositionUs = time
+            if (durationUs > 0) {
+                val f = time.toDouble() / durationUs
+                if (f - lastProgress >= 0.005) { progress(f); lastProgress = f }
+            }
+        }
+
+        fun formatChanged(f: MediaFormat) {
+            rate = f.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            channels = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            if (f.containsKey(MediaFormat.KEY_PCM_ENCODING)) encoding = f.getInteger(MediaFormat.KEY_PCM_ENCODING)
+            st.formatChanges++
+        }
+
+        /** Output buffer [o] into the PCM file and back to the codec; true at the end of the stream. */
+        fun drain(o: Int, info: MediaCodec.BufferInfo): Boolean {
+            var t = System.nanoTime()
+            val buf = codec.getOutputBuffer(o)!!.order(ByteOrder.LITTLE_ENDIAN)
+            buf.position(info.offset)
+            buf.limit(info.offset + info.size)
+            val s = sink ?: Sink(file, rate).also { sink = it }
+            val bytesPer = when (encoding) {
+                AudioFormat.ENCODING_PCM_FLOAT -> 4
+                AudioFormat.ENCODING_PCM_8BIT -> 1
+                else -> 2
+            }
+            val frames = info.size / (bytesPer * channels)
+            if (mono.size < frames) mono = FloatArray(frames)
+            for (fr in 0 until frames) {
+                var acc = 0f
+                for (c in 0 until channels) acc += when (encoding) {
+                    AudioFormat.ENCODING_PCM_FLOAT -> buf.float
+                    AudioFormat.ENCODING_PCM_8BIT -> ((buf.get().toInt() and 0xff) - 128) / 128f
+                    else -> buf.short / 32768f
+                }
+                mono[fr] = if (channels == 1) acc else acc / channels
+            }
+            s.push(mono, frames)
+            st.convertNs += System.nanoTime() - t
+            t = System.nanoTime()
+            codec.releaseOutputBuffer(o, false)
+            st.releaseNs += System.nanoTime() - t
+            st.outputs++
+            st.point(s.written)
+            return info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+        }
+
+        /** Every free input buffer filled and every ready output buffer drained; a wait only when neither moved. */
+        fun sync(cancel: () -> Boolean, deadline: Long?) {
+            val info = MediaCodec.BufferInfo()
+            var idle = false
+            while (true) {
+                if (cancel()) throw DecodeException("cancelled")
+                if (deadline != null && System.nanoTime() > deadline) { st.capped = true; return }
+                var moved = false
+                while (!inputDone) {
+                    val t = System.nanoTime()
+                    val i = codec.dequeueInputBuffer(0)
+                    st.dequeueInNs += System.nanoTime() - t
+                    if (i < 0) break
+                    feed(i)
+                    moved = true
+                }
+                var wait = if (idle) WAIT_US else 0L
+                while (true) {
+                    val t = System.nanoTime()
+                    val o = codec.dequeueOutputBuffer(info, wait)
+                    val dt = System.nanoTime() - t
+                    if (wait > 0) { st.waits++; st.waitNs += dt } else st.dequeueOutNs += dt
+                    wait = 0
+                    if (o == MediaCodec.INFO_TRY_AGAIN_LATER) { st.emptyPolls++; break }
+                    moved = true
+                    if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) { formatChanged(codec.outputFormat); continue }
+                    if (o < 0) continue
+                    if (drain(o, info)) return
+                }
+                idle = !moved
+            }
+        }
+
+        /**
+         * The builds before this one: free inputs filled, then one output buffer a turn, a 5 ms wait after an empty poll.
+         * (The loop before that, one input and a 10 ms wait for one output a turn, read the 54 min FLAC fixture in 616 s
+         * on a Galaxy S26; this one in 44 s there and 417.8 s on a Pixel 8a.)
+         */
+        fun legacy(cancel: () -> Boolean, deadline: Long?) {
+            val info = MediaCodec.BufferInfo()
+            var waitUs = 0L
+            while (true) {
+                if (cancel()) throw DecodeException("cancelled")
+                if (deadline != null && System.nanoTime() > deadline) { st.capped = true; return }
+                while (!inputDone) {
+                    val t = System.nanoTime()
+                    val i = codec.dequeueInputBuffer(0)
+                    st.dequeueInNs += System.nanoTime() - t
+                    if (i < 0) break
+                    feed(i)
+                }
+                val t = System.nanoTime()
+                val o = codec.dequeueOutputBuffer(info, waitUs)
+                val dt = System.nanoTime() - t
+                if (waitUs > 0) { st.waits++; st.waitNs += dt } else st.dequeueOutNs += dt
+                if (o == MediaCodec.INFO_TRY_AGAIN_LATER) { st.emptyPolls++; waitUs = 5_000; continue }
+                waitUs = 0
+                if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) { formatChanged(codec.outputFormat); continue }
+                if (o < 0) continue
+                if (drain(o, info)) return
+            }
+        }
+
+        /** MediaCodec's callbacks on a thread of their own; the calling thread only waits for the end, a stop or the cap. */
+        fun async(cancel: () -> Boolean, deadline: Long?) {
+            val th = HandlerThread("decode-codec").also { it.start(); thread = it }
+            val done = CountDownLatch(1)
+            val error = AtomicReference<Throwable?>(null)
+            // A callback that was running when the codec stopped (the cap, a stop) fails on the stopped codec: not an error.
+            fun fail(t: Throwable) { if (!stopped.get() && error.compareAndSet(null, t)) done.countDown() }
+            codec.setCallback(object : MediaCodec.Callback() {
+                override fun onInputBufferAvailable(c: MediaCodec, index: Int) {
+                    if (stopped.get() || inputDone) return
+                    try { feed(index) } catch (t: Throwable) { fail(t) }
+                }
+
+                override fun onOutputBufferAvailable(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                    if (stopped.get()) return
+                    try { if (drain(index, info)) done.countDown() } catch (t: Throwable) { fail(t) }
+                }
+
+                override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) = formatChanged(format)
+
+                override fun onError(c: MediaCodec, e: MediaCodec.CodecException) = fail(e)
+            }, Handler(th.looper))
+            codec.configure(inFormat, null, null, 0)
+            codec.start()
+            while (!done.await(100, TimeUnit.MILLISECONDS)) {
+                if (cancel()) { stopCodec(); throw DecodeException("cancelled") }
+                if (deadline != null && System.nanoTime() > deadline) { st.capped = true; break }
+            }
+            stopCodec()
+            error.get()?.let { throw DecodeException("The decoder failed: ${it.message ?: it.javaClass.simpleName}", it) }
+        }
+
+        /** Stops the codec and, in async mode, its callback thread, so that nothing writes the PCM file any more. Idempotent. */
+        fun stopCodec() {
+            if (!stopped.compareAndSet(false, true)) return
+            runCatching { codec.stop() }
+            thread?.let { it.quitSafely(); it.join(2000) }
         }
     }
 }

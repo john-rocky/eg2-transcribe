@@ -54,8 +54,11 @@ import org.json.JSONObject
  * Launch extras (the device check, README.md "How the device check works"): --es file <path or name under files/>
  * transcribes that file, --ei mic_ms <ms> records that long from the microphone and transcribes it; with either,
  * --es report <name.json> writes the run report and --ez dump true also the per-token files. Settings: --es backend
- * cpu|gpu_fp32|gpu_default|npu, --es model <file> (either file of a _w30 / _w10 pair), --ei window_s 30|10 (the NPU
- * always runs 10 s windows), --ei overlap <tokens>, --ef min_rms <rms>.
+ * cpu|gpu_fp32|gpu_default|npu, --es model <file> (either file of a _w30 / _w10 pair), --ei window_s 0|30|10 (0 = auto,
+ * the default; the NPU always runs 10 s windows), --ei overlap <tokens>, --ef min_rms <rms>. Measurements only, not on
+ * the screen: --es reader_precision fp32|fp16acc32 (the reader on a GPU), --es decode_mode sync|async|legacy (how a
+ * compressed file is fed through MediaCodec), and --ez decode_only true with --es file: read the file, report where the
+ * time went and stop (no model; --ei decode_cap_s <s> stops the read after that long).
  * A start with file or mic_ms shows over the lock screen and keeps the display on (a phone asleep behind a lock keeps
  * the app on its slow cores).
  *
@@ -124,7 +127,9 @@ class MainActivity : Activity() {
             Session.status = "Starting…"
         }
         render()
-        if (pending.get() == 0 && !Session.busy && Engine.loaded == null) submit { Jobs.loadModel(applicationContext) }
+        // A decode-only start (the decode measurement) leaves the model alone.
+        val decodeOnly = savedInstanceState == null && intent.getBooleanExtra("decode_only", false)
+        if (pending.get() == 0 && !Session.busy && Engine.loaded == null && !decodeOnly) submit { Jobs.loadModel(applicationContext) }
         // A recreated activity (savedInstanceState set) gets its first intent again: that start already ran.
         if (savedInstanceState == null) runFromIntent(intent)
     }
@@ -194,9 +199,17 @@ class MainActivity : Activity() {
     private fun applySettings(i: Intent) {
         Backend.parse(i.getStringExtra("backend"))?.let { Session.backend = it }
         i.getStringExtra("model")?.let { Session.modelName = it }
-        if (i.hasExtra("window_s")) Session.windowFrames = if (i.getIntExtra("window_s", 30) == 10) WindowPlan.FRAMES_10S else WindowPlan.FRAMES_30S
-        if (i.hasExtra("overlap")) Session.overlapTokens = i.getIntExtra("overlap", WindowPlan.DEFAULT_OVERLAP).coerceIn(0, WindowPlan.maxOverlap(Session.windowFrames))
+        if (i.hasExtra("window_s")) Session.windowFrames = when (i.getIntExtra("window_s", 0)) {
+            10 -> WindowPlan.FRAMES_10S
+            30 -> WindowPlan.FRAMES_30S
+            else -> WindowPlan.AUTO
+        }
+        // "auto" runs one 10 s window or 30 s windows: the overlap is bounded by the 30 s window.
+        val longest = if (Session.windowFrames == WindowPlan.AUTO) WindowPlan.FRAMES_30S else Session.windowFrames
+        if (i.hasExtra("overlap")) Session.overlapTokens = i.getIntExtra("overlap", WindowPlan.DEFAULT_OVERLAP).coerceIn(0, WindowPlan.maxOverlap(longest))
         if (i.hasExtra("min_rms")) Session.minRms = i.getFloatExtra("min_rms", Engine.MIN_RMS.toFloat()).toDouble()
+        ReaderPrecision.parse(i.getStringExtra("reader_precision"))?.let { Session.readerPrecision = it }
+        AudioDecoder.Mode.parse(i.getStringExtra("decode_mode"))?.let { Session.decodeMode = it }
         i.getStringExtra("picker_dir")?.let { Session.pickerDir = it }
         i.getStringExtra("picker_report")?.let { Session.pickerReport = it }
         // The recording harness without a job: show over the lock screen and keep the display on, as a check's start does.
@@ -210,10 +223,13 @@ class MainActivity : Activity() {
         if (file == null && dir == null && micMs == null) return
         recordMode()
         val req = Jobs.Request(i.getStringExtra("report"), i.getBooleanExtra("dump", false))
+        val decodeOnly = i.getBooleanExtra("decode_only", false)
+        val capMs = if (i.hasExtra("decode_cap_s")) i.getIntExtra("decode_cap_s", 0) * 1000L else null
         // A start that is handled once: a later onNewIntent or a recreated activity does not run it again.
         i.removeExtra("file")
         i.removeExtra("dir")
         i.removeExtra("mic_ms")
+        i.removeExtra("decode_only")
         if (isRunning) {
             Log.i(TAG, "BUSY ignored a start (report=${req.report}): one transcription at a time")
             req.report?.let { name ->
@@ -233,7 +249,8 @@ class MainActivity : Activity() {
         } else if (file != null) {
             val f = if (file.startsWith("/")) File(file) else File(Engine.filesDir(this), file)
             stopDecode.set(false)
-            submit(true) { Jobs.transcribeUri(applicationContext, Uri.fromFile(f), f.name, req, stopDecode) }
+            if (decodeOnly) submit(true) { Jobs.decodeOnly(applicationContext, Uri.fromFile(f), f.name, req, stopDecode, Session.decodeMode, capMs) }
+            else submit(true) { Jobs.transcribeUri(applicationContext, Uri.fromFile(f), f.name, req, stopDecode) }
         } else {
             stopMic.set(false)
             submit(true) { Jobs.transcribeMic(applicationContext, micMs, req, stopMic) }
@@ -426,22 +443,28 @@ class MainActivity : Activity() {
     private fun onWindowChange() {
         val have = Jobs.modelChoice(this).windows
         val all = listOf(
-            WindowChoice(WindowPlan.FRAMES_30S, 96, "30 s windows, 96-token overlap (3.84 s) — default"),
+            WindowChoice(WindowPlan.AUTO, 96, "Auto: the 10 s files for a recording of up to 9.96 s, 30 s windows for a longer one — default"),
+            WindowChoice(WindowPlan.FRAMES_30S, 96, "30 s windows, 96-token overlap (3.84 s)"),
             WindowChoice(WindowPlan.FRAMES_30S, 128, "30 s windows, 128-token overlap (5.12 s)"),
             WindowChoice(WindowPlan.FRAMES_30S, 0, "30 s windows, no overlap (the start of each window is damaged)"),
             WindowChoice(WindowPlan.FRAMES_10S, 96, "10 s windows, 96-token overlap"),
             WindowChoice(WindowPlan.FRAMES_10S, 0, "10 s windows, no overlap"),
         )
-        // The NPU runs the 10 s file only; a model offers the lengths it has a file for.
-        val choices = all.filter { (Session.backend != Backend.NPU || it.frames == WindowPlan.FRAMES_10S) && (have.isEmpty() || it.frames in have) }
+        // The NPU runs the 10 s file only; a model offers the lengths it has a file for ("auto" when it has both).
+        val choices = all.filter { c ->
+            if (Session.backend == Backend.NPU) c.frames == WindowPlan.FRAMES_10S
+            else if (c.frames == WindowPlan.AUTO) have.isEmpty() || have.size == 2
+            else have.isEmpty() || c.frames in have
+        }
         val title = if (Session.backend == Backend.NPU) "Windows (the NPU runs 10 s windows)" else "Windows"
         AlertDialog.Builder(this).setTitle(title).setItems(choices.map { it.label }.toTypedArray()) { _, which ->
-            val changed = choices[which].frames != Session.windowFrames
+            val before = Jobs.pickWindow(applicationContext, null).frames
             Session.windowFrames = choices[which].frames
             Session.overlapTokens = choices[which].overlap
+            Session.lastWindowNote = null
             render()
             // Another window length is another file of the pair: compile it now (the NPU keeps its 10 s file).
-            if (changed && Session.backend != Backend.NPU && !isBusy) submit { Jobs.loadModel(applicationContext) }
+            if (Jobs.pickWindow(applicationContext, null).frames != before && Session.backend != Backend.NPU && !isBusy) submit { Jobs.loadModel(applicationContext) }
         }.setNegativeButton("Cancel", null).show()
     }
 
@@ -615,8 +638,12 @@ class MainActivity : Activity() {
         readerValue.text = Session.readerLine.ifEmpty { "…" }
         readerValue.setTextColor(if (Session.readerIsStub) C_WARN else C_TEXT)
         val windowS = Session.effectiveWindowFrames() / 100
-        windowValue.text = "$windowS s, overlap ${Session.overlapTokens} tokens (${String.format(Locale.US, "%.2f", Session.overlapTokens * 0.04)} s)" +
-            if (Session.backend == Backend.NPU || Engine.loaded?.encoder?.backend == Backend.NPU) " · the NPU runs 10 s windows" else ""
+        val overlapText = "overlap ${Session.overlapTokens} tokens (${String.format(Locale.US, "%.2f", Session.overlapTokens * 0.04)} s)"
+        windowValue.text = if (Session.windowFrames == WindowPlan.AUTO && Session.backend != Backend.NPU) {
+            "auto: 10 s files up to 9.96 s, 30 s windows above" + (Session.lastWindowNote?.let { " · last run $it" } ?: " · $windowS s files loaded")
+        } else {
+            "$windowS s, $overlapText" + if (Session.backend == Backend.NPU || Engine.loaded?.encoder?.backend == Backend.NPU) " · the NPU runs 10 s windows" else ""
+        }
         engineLine.text = Session.engineLine
         engineLine.visibility = if (Session.engineLine.isEmpty()) View.GONE else View.VISIBLE
         fallbackLine.text = Session.fallbackLine ?: ""

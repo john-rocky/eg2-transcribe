@@ -113,10 +113,13 @@ class Encoder private constructor(
         val t = System.nanoTime()
         s.mel.writeFloat(mel)
         s.mask.writeFloat(mask)
+        val t1 = System.nanoTime()
         model.run(s.inputs, s.outputs, s.name)
+        val t2 = System.nanoTime()
         val soft = s.soft.readFloat()
         val m = s.outMask.readFloat()
-        return EncoderOutput(soft, m, (System.nanoTime() - t) / 1e6)
+        val t3 = System.nanoTime()
+        return EncoderOutput(soft, m, (t3 - t) / 1e6, (t1 - t) / 1e6, (t2 - t1) / 1e6, (t3 - t2) / 1e6)
     }
 
     private fun warmUp() {

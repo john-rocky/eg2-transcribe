@@ -43,6 +43,8 @@ android {
             it.testLogging { events("passed", "failed", "skipped"); showStandardStreams = true }
             // -Peg2.replay=<dir>: ReplayTest runs the pipeline on encoder outputs computed on a computer (its KDoc).
             providers.gradleProperty("eg2.replay").orNull?.let { dir -> it.systemProperty("eg2.replay", dir) }
+            // -Peg2.flac=<list>: FlacTest decodes every file of the list against ffmpeg's samples (its KDoc).
+            providers.gradleProperty("eg2.flac").orNull?.let { list -> it.systemProperty("eg2.flac", list) }
         }
     }
 }
