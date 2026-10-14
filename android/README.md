@@ -15,7 +15,7 @@ Android 8.0 (API 26) or newer, arm64. LiteRT 2.2.0 (`com.google.ai.edge.litert:l
 
 ## The model files
 
-The app needs five files, which are not in this repository. Download them from this project's Hugging Face repository (its id is fixed at release):
+The app needs five files, which are not in this repository. Download them from this project's Hugging Face repository, [mlboydaisuke/EmbeddingGemma-2-Transcribe-LiteRT](https://huggingface.co/mlboydaisuke/EmbeddingGemma-2-Transcribe-LiteRT):
 
 | file | bytes | SHA-256 | what |
 |---|---:|---|---|
