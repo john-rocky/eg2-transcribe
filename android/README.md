@@ -117,7 +117,7 @@ The device check below with this version (debug build, LiteRT 2.2.0), the fp16-w
 | Pixel 8a | GPU fp32 | the 20 test-clean fixtures | 46.0 s for the 20 | | 20 of 20 transcripts equal to the reader's outputs listed in `reader/RELEASE.md` |
 | Pixel 8a | CPU, 4 threads | the 20 fixtures | 130.2 s for the 20 | | 20 of 20 |
 
-Per 30 s window on the Pixel 8a, the encoder took 1.40 s and the reader 0.84 s on the GPU (median over the 54 minutes, thermal status 2), and 3.4–4.6 s and 2.1–2.8 s on the CPU. The times cover log-mel, encoder, reader and words; reading the 54-minute FLAC came on top (417.8 s on the Pixel 8a). With both models on the GPU the app peaked at 4,478,456 kB (VmHWM, 4.3 GiB). When the check ran the 20 fixtures on the GPU right after the CPU run, free memory fell to 496 MB while the reader compiled and the check stopped the app at its own 800 MB line; a fresh start passed with at least 1.68 GB free.
+Per 30 s window on the Pixel 8a, the encoder took 1.40 s and the reader 0.84 s on the GPU (median over the 54 minutes, thermal status 2), and 3.4–4.6 s and 2.1–2.8 s on the CPU. The times cover log-mel, encoder, reader and words; reading the 54-minute FLAC came on top (417.8 s on the Pixel 8a). With both models on the GPU the app peaked at 4,478,456 kB (VmHWM, 4.3 GiB) over the 54 minutes and at 5,000,744 kB (4.8 GiB) over the 20 fixtures. When the check ran the 20 fixtures on the GPU right after the CPU run, MemAvailable fell to 496,116 kB while the reader compiled and the check stopped the app at its own line of 800,000 kB; a fresh start passed with MemAvailable at 1,683,528 kB or more.
 
 A missing encoder file and 3 s of near silence ended with their sentences on the screen ("MODEL MISSING", "NO SPEECH").
 
