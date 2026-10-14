@@ -32,23 +32,21 @@ class StubTest {
     @Test
     fun knownSoftTokensReadAsKnownWords() {
         assertEquals(1000, vocab.size)
-        val table = Stub.table(vocab)
-        val reader = Stub.reader()
-        // The blank vector, recovered the way Stub.reader builds it, for a blank token.
+        val reader = Stub.reader(vocab, null, 1)
+        val table = reader.table
+        // The blank vector, recovered the way Stub builds it, for a blank token.
         val braw = Stub.uniform(Stub.DIM, skip = Stub.WORDS.toLong() * Stub.DIM)
         val bnorm = Math.sqrt(braw.sumOf { it.toDouble() * it })
         val blankVec = FloatArray(Stub.DIM) { (braw[it] / bnorm).toFloat() }
         assertEquals("215a5dd815fe409a280b5222df07a5b8ce8933edc6948c142b1fe2c091c29d97", sha256(blankVec))
+        assertEquals(sha256(blankVec), sha256(Stub.blankVector()))
         val rows = listOf(17, 17, 17, -1, 42, 42, 999, 0)
         val n = rows.size
         val soft = FloatArray(n * SOFT_DIM)
         rows.forEachIndexed { t, j -> (if (j < 0) blankVec else table.row(j)).forEachIndexed { i, x -> soft[t * SOFT_DIM + i] = x * 29f } }
-        val vectors = FloatArray(n * reader.dim)
-        val blank = DoubleArray(n)
-        reader.read(soft, 0, n, vectors, blank)
-        val r = IntArray(n); val cos = DoubleArray(n); val second = DoubleArray(n)
-        table.nearestAll(vectors, n, null, 1, r, cos, second)
-        val ids = IntArray(n) { if (reader.isBlank(blank[it], cos[it])) Ctc.BLANK else r[it] }
+        val read = reader.read(soft, n, n, 0, n)
+        val ids = IntArray(n); val word = IntArray(n); val best = DoubleArray(n); val blank = DoubleArray(n)
+        read.labels(ids, word, best, blank)
         assertEquals(listOf(17, 17, 17, Ctc.BLANK, 42, 42, 999, 0), ids.toList())
         val words = Ctc(vocab).feed(ids, n, 0)
         assertEquals(listOf(vocab[17], vocab[42], vocab[999], vocab[0]), words.map { it.text })

@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
@@ -82,6 +83,7 @@ class MainActivity : Activity() {
     private lateinit var openButton: Button
     private lateinit var againButton: Button
     private lateinit var stopButton: Button
+    private lateinit var exampleButton: Button
     private lateinit var inputLine: TextView
     private lateinit var progressBar: ProgressBar
     private lateinit var progressLine: TextView
@@ -147,7 +149,7 @@ class MainActivity : Activity() {
             Engine.cancel.set(true)
             stopMic.set(true)
             stopDecode.set(true)
-            submit { Engine.closeEncoder() }
+            submit { Engine.closeReader(); Engine.closeEncoder() }
         }
         super.onDestroy()
     }
@@ -195,16 +197,22 @@ class MainActivity : Activity() {
         if (i.hasExtra("window_s")) Session.windowFrames = if (i.getIntExtra("window_s", 30) == 10) WindowPlan.FRAMES_10S else WindowPlan.FRAMES_30S
         if (i.hasExtra("overlap")) Session.overlapTokens = i.getIntExtra("overlap", WindowPlan.DEFAULT_OVERLAP).coerceIn(0, WindowPlan.maxOverlap(Session.windowFrames))
         if (i.hasExtra("min_rms")) Session.minRms = i.getFloatExtra("min_rms", Engine.MIN_RMS.toFloat()).toDouble()
+        i.getStringExtra("picker_dir")?.let { Session.pickerDir = it }
+        i.getStringExtra("picker_report")?.let { Session.pickerReport = it }
+        // The recording harness without a job: show over the lock screen and keep the display on, as a check's start does.
+        if (i.getBooleanExtra("keep_visible", false)) recordMode()
     }
 
     private fun runFromIntent(i: Intent) {
         val file = i.getStringExtra("file")
+        val dir = i.getStringExtra("dir")
         val micMs = if (i.hasExtra("mic_ms")) i.getIntExtra("mic_ms", 0).toLong() else null
-        if (file == null && micMs == null) return
+        if (file == null && dir == null && micMs == null) return
         recordMode()
         val req = Jobs.Request(i.getStringExtra("report"), i.getBooleanExtra("dump", false))
         // A start that is handled once: a later onNewIntent or a recreated activity does not run it again.
         i.removeExtra("file")
+        i.removeExtra("dir")
         i.removeExtra("mic_ms")
         if (isRunning) {
             Log.i(TAG, "BUSY ignored a start (report=${req.report}): one transcription at a time")
@@ -217,7 +225,12 @@ class MainActivity : Activity() {
             }
             return
         }
-        if (file != null) {
+        if (dir != null) {
+            // The device check's fixture mode: every audio file of a directory in turn, one report.
+            val d = if (dir.startsWith("/")) File(dir) else File(Engine.filesDir(this), dir)
+            stopDecode.set(false)
+            submit(true) { Jobs.transcribeDir(applicationContext, d, req, stopDecode) }
+        } else if (file != null) {
             val f = if (file.startsWith("/")) File(file) else File(Engine.filesDir(this), file)
             stopDecode.set(false)
             submit(true) { Jobs.transcribeUri(applicationContext, Uri.fromFile(f), f.name, req, stopDecode) }
@@ -275,9 +288,23 @@ class MainActivity : Activity() {
         }
     }
 
+    /** The bundled example (an 8 s LibriSpeech utterance in the APK), copied out once and transcribed like an opened file. */
+    private fun onExample() {
+        if (isBusy) return
+        stopDecode.set(false)
+        submit(true) {
+            val f = Examples.file(applicationContext)
+            Jobs.transcribeUri(applicationContext, Uri.fromFile(f), Examples.NAME, Jobs.Request(Session.pickerReport, false), stopDecode)
+        }
+    }
+
     private fun onOpenFile() {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("audio/*")
             .putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("audio/*", "application/ogg", "video/mp4"))
+        // The recording harness can open the picker in one folder of the shared storage (launch extra picker_dir).
+        Session.pickerDir?.let { d ->
+            if (Build.VERSION.SDK_INT >= 26) i.putExtra(DocumentsContract.EXTRA_INITIAL_URI, DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:$d"))
+        }
         runCatching { startActivityForResult(i, REQ_AUDIO) }.onFailure { showStatus("No file picker on this phone: ${it.message}") }
     }
 
@@ -297,7 +324,7 @@ class MainActivity : Activity() {
         when (requestCode) {
             REQ_AUDIO -> {
                 stopDecode.set(false)
-                submit(true) { Jobs.transcribeUri(applicationContext, uri, name, Jobs.Request(null, false), stopDecode) }
+                submit(true) { Jobs.transcribeUri(applicationContext, uri, name, Jobs.Request(Session.pickerReport, false), stopDecode) }
             }
             REQ_MODEL -> {
                 if (!name.endsWith(".tflite")) {
@@ -507,6 +534,8 @@ class MainActivity : Activity() {
         stopButton = button("Stop") { onStopTapped() }
         for (b in listOf(recordButton, openButton, againButton, stopButton)) actions.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(actions)
+        exampleButton = button("Try") { onExample() }
+        root.addView(row("Example", label(14f).apply { text = Examples.LABEL }, exampleButton))
         inputLine = label(13f, C_SUB)
         root.addView(inputLine)
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000 }
@@ -603,6 +632,7 @@ class MainActivity : Activity() {
         recordButton.text = if (Session.recording) "■ Stop" else "● Record"
         recordButton.isEnabled = Session.recording || !busy
         openButton.isEnabled = !busy
+        exampleButton.isEnabled = !busy
         againButton.isEnabled = !busy && Session.lastInput != null
         stopButton.isEnabled = Session.decoding || Session.transcribing
         inputLine.text = Session.inputLine

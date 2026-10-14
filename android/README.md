@@ -1,6 +1,6 @@
 # Eg2 Transcribe for Android (LiteRT)
 
-Record with the microphone or open an audio file, and the app writes down the English words with their times, on the phone. The audio encoder of [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) runs on LiteRT (CPU, GPU or the Qualcomm NPU) and turns every 40 ms of audio into a vector; a reader maps each vector into the model's text space and the nearest word of a word table is read out. Until a trained reader is installed, the app runs a stub reader whose words are placeholders: everything around it (log-mel, windows, encoder, timing) is the real pipeline.
+Record with the microphone or open an audio file, and the app writes down the English words with their times, on the phone. The audio encoder of [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) runs on LiteRT (CPU, GPU or the Qualcomm NPU) and turns every 40 ms of audio into a vector; a small trained reader (reader v1, `reader/RELEASE.md`) maps each vector into the model's text space and the best of 200,000 words, or a blank, is read out. Without the reader's files the app runs a stub reader whose words are placeholders.
 
 The app has no INTERNET permission; audio, model and transcript stay on the phone.
 
@@ -15,32 +15,35 @@ Android 8.0 (API 26) or newer, arm64. LiteRT 2.2.0 (`com.google.ai.edge.litert:l
 
 ## The model files
 
-The encoder is two separate files, one per window length: the audio tower and `embed_audio` of `google/embeddinggemma-2` exported with litert-torch, with every RMSNorm rescaled so that its sums stay inside the float16 range (in float32 the rescaled graph gives the same numbers bit for bit; the GPU at float16 and the NPU need the rescaling) and the weights of the fully connected and convolution layers stored as float16:
+The app needs five files, which are not in this repository. Download them from this project's Hugging Face repository (its id is fixed at release):
 
-| file | bytes | signature | inputs | outputs |
-|---|---|---|---|---|
-| `eg2_audio_f16safe_fp16w_w30.tflite` | 589,273,696 | `audio_30s` | `mel` [1, 3000, 128], `mask` [1, 3000] | `soft` [1, 750, 512], `mask` [1, 750] |
-| `eg2_audio_f16safe_fp16w_w10.tflite` | 589,015,376 | `audio_10s` | `mel` [1, 1000, 128], `mask` [1, 1000] | `soft` [1, 250, 512], `mask` [1, 250] |
+| file | bytes | SHA-256 | what |
+|---|---:|---|---|
+| `eg2_audio_f16safe_fp16w_w30.tflite` | 589,273,696 | `f0f6c37ee62b51372ab28013617aad53793a84aaddd96e1e844d0cea0eb2f11d` | the encoder for 30 s windows (signature `audio_30s`) |
+| `eg2_audio_f16safe_fp16w_w10.tflite` | 589,015,376 | `1405986b353c3152e4a677d9446a5694a0f8fd0b13b794d26c892ef85295188c` | the encoder for 10 s windows (`audio_10s`; the NPU runs this one) |
+| `reader_w30.tflite` | 361,494,720 | `76bdcce94e7311ee36529727e4bfd94675fe225c9d361c5628e98f5c432742e8` | reader v1 with the word table, 30 s windows (`reader_30s`; The reader, below) |
+| `reader_w10.tflite` | 361,238,720 | `9419000ac89aa3f34478906dda81523f48bf0e8c802929df3345ba0850b72d3f` | the same for 10 s windows (`reader_10s`) |
+| `vocab.txt` | 1,737,588 | `bb3b3c70379082333e1bbd90d07ca69fe5c0096bd1c3b2b3f83edd65f1062a68` | the reader's 200,000 words, one per line (`reader/vocab.txt` of this repository) |
 
-The CPU and the GPU run the 30 s file, the NPU runs the 10 s file (Windows, below). Masks are float32, 1 for a real frame or token. The files are not in this repository.
+The encoder files are the audio tower and `embed_audio` of `google/embeddinggemma-2` exported with litert-torch, one file per window length, with every RMSNorm rescaled so that its sums stay inside the float16 range (in float32 the rescaled graph gives the same numbers bit for bit; the GPU at float16 and the NPU need the rescaling) and the weights of the fully connected and convolution layers stored as float16. Inputs `mel` [1, F, 128] and `mask` [1, F] (F = 3000 or 1000 log-mel frames), outputs `soft` [1, F / 4, 512] and `mask` [1, F / 4]; masks are float32, 1 for a real frame or token. The CPU and the GPU run the 30 s file, the NPU the 10 s file (Windows, below).
 
 The float16 weights halve the files; the graph turns them back into float32 before use, so the CPU and the GPU at fp32 precision compute in float32 with rounded weights. Measured against the float32 PyTorch encoder on test windows: on the GPU of a Pixel 8a at fp32 precision the 30 s file's tokens are within 5.1 × 10⁻⁴ (cosine 0.9999999955 at the lowest, 7 windows, 2,306 tokens); on the NPU of a Galaxy S26 the 10 s file's tokens reach a cosine of 0.9999936 on average and 0.9975 at the lowest (9 windows, 1,806 tokens). The float32-weight pair `eg2_audio_f16safe_w30.tflite` / `_w10.tflite` (1,175,047,892 / 1,174,789,572 bytes) is used the same way.
 
-A file named `<name>_w30.tflite` and one named `<name>_w10.tflite` are one model: the app offers a window length when its file is there. Any other `.tflite` with one or both of the signatures (such as an earlier export that holds both) is a model of its own; the NPU runs only a `_w10` file.
+A file named `<name>_w30.tflite` and one named `<name>_w10.tflite` are one model: the app offers a window length when its file is there. Any other `.tflite` with one or both of the encoder signatures (such as an earlier export that holds both) is a model of its own; the NPU runs only a `_w10` file.
 
 Put them on the phone in one of two ways:
 
 - **adb**: start the app once (it creates its files directory and shows "MODEL MISSING"), then
   `adb push eg2_audio_f16safe_fp16w_w30.tflite /sdcard/Android/data/io.github.johnrocky.eg2transcribe/files/`
   `adb push eg2_audio_f16safe_fp16w_w10.tflite /sdcard/Android/data/io.github.johnrocky.eg2transcribe/files/`
-  and come back to the app. A directory made by `adb shell` before the app has started once is not one the app can read.
-- **On the phone**: tap **Change** next to Model, then **Choose a file on this phone…** and pick a file; the app copies it into its files directory (589 MB each; copy both files of a pair).
+  and the reader files into `files/reader/` (The reader, below), and come back to the app. A directory made by `adb shell` before the app has started once is not one the app can read.
+- **On the phone**: tap **Change** next to Model, then **Choose a file on this phone…** and pick an encoder file; the app copies it into its files directory (589 MB each; copy both files of a pair). The reader files go into `files/reader/` with adb or a file manager.
 
-Other `.tflite` files in that directory show up under Model → Change.
+Other `.tflite` files in the files directory show up under Model → Change.
 
 ## Using it
 
-- **Record** starts the microphone (16 kHz mono); **Stop** ends the recording and the transcription starts. **Open audio file** takes WAV, FLAC, MP3, M4A/AAC, Ogg and whatever else the phone can decode; other sample rates are resampled to 16 kHz, stereo is mixed down. **Again** transcribes the last input again (for example on another backend), **Stop** ends a transcription after the current window.
+- **Record** starts the microphone (16 kHz mono); **Stop** ends the recording and the transcription starts. **Open audio file** takes WAV, FLAC, MP3, M4A/AAC, Ogg and whatever else the phone can decode; other sample rates are resampled to 16 kHz, stereo is mixed down. **Example → Try** transcribes the 8 s LibriSpeech utterance bundled in the app (test-clean 1284-1180-0000), to try the app without a file of your own. **Again** transcribes the last input again (for example on another backend), **Stop** ends a transcription after the current window.
 - While it runs, the screen shows "Window k of N", the time since the start and the speed as a multiple of real time (audio seconds per second). The transcript is lower case without punctuation, a line with its time every 10 s of audio.
 - Input shorter than 1 s is refused ("TOO SHORT"), and so is input quieter than RMS 0.005 (−46 dBFS, "NO SPEECH": the floor sits above two silent recordings made through a Galaxy S26 microphone). Without the microphone permission the screen says how to turn it on; a tap on that line opens the app's settings.
 
@@ -53,19 +56,42 @@ Other `.tflite` files in that directory show up under Model → Change.
 | GPU default | LiteRT's GPU accelerator with its default precision (fp16 on most phones) |
 | NPU | the Qualcomm Hexagon NPU with the 10 s file; the graph is compiled on the phone once per model file (needs the NPU libraries in the APK, below) |
 
-GPU fp32 is the default. When the GPU cannot compile the graph, cannot run it, or gives non-finite values in a test run, the app runs the encoder on the CPU and says so in red under the backend buttons. When the NPU cannot be used (an unsupported chip, an APK without the libraries, no `_w10` file, a failed compile, or a graph LiteRT did not hand to the NPU), the app runs GPU fp32 instead and says why in the same place. The log-mel, the reader and the word search always run on the CPU.
+GPU fp32 is the default. When the GPU cannot compile the graph, cannot run it, or gives non-finite values in a test run, the app runs the encoder on the CPU and says so in red under the backend buttons. When the NPU cannot be used (an unsupported chip, an APK without the libraries, no `_w10` file, a failed compile, or a graph LiteRT did not hand to the NPU), the app runs GPU fp32 instead and says why in the same place. The reader runs on the same accelerator as the encoder (GPU fp32 when the encoder is on the NPU), right after it on each window; the log-mel of the next window is computed on the CPU meanwhile.
 
 ## Windows
 
-The encoder is called on fixed windows of 30 s (or 10 s), and a call knows nothing about the audio before its window, so the tokens at its start come out wrong. Each window therefore starts 96 tokens (3.84 s) before the end of the previous one and keeps only its tokens after that overlap; window 0 keeps all of them. On the right, token j reads mel frames 4j − 3 to 4j + 3, so a window's last token needs 3 frames past its 30 s (`right_extra_tokens: 1`, 640 samples, in the shared window contract): the app computes the log-mel of the whole recording and cuts windows out of those frames, so every window but the last has them, and at the end of the recording a token whose frames run past the last one is dropped (a recording of F frames keeps floor(F / 4) tokens). A window cut out of exactly 30 s of audio instead would lose its last token (cosine 0.49 on average to the continuous stream on the 54-minute fixture, measured for the iOS port). Measured on a Mac with the opening 10 minutes of the 54-minute fixture against the encoder run on the whole stream: 30 s windows with a 96-token overlap give a minimum token cosine of 0.99994 (0.99999994 on average) for 1.147× the encoder work; without the overlap the minimum is −0.16. **Windows → Change** offers the lengths the model has a file for and a few overlaps. With a file that holds both signatures, a last window with at most 10 s of audio runs on `audio_10s`.
+The encoder is called on fixed windows of 30 s (or 10 s), and a call knows nothing about the audio before its window, so the tokens at its start come out wrong. The windows follow the reader's window contract (`reader/reader_config.json`, `window`: 30 s, 96 tokens of left overlap, 1 token at the right), the same cut as the iOS port's:
 
-The NPU runs 10 s windows. Its compiler builds the graph on the phone, and for the 30 s graph that step needed more memory than a Galaxy S26 (12 GB) had free (6.8 GB, the run was stopped; the 10 s graph compiles). With the same 96-token overlap a 10 s window keeps 154 new tokens of its 250, so the encoder does 1.623× the work of one pass over the audio instead of 1.147× with 30 s windows.
+- Window k starts at token 653 k (750 − 96 − 1; frame 2,612 k) and keeps its tokens from 96 on (3.84 s of overlap); window 0 keeps them from 0.
+- Every window but the last stops one token short of its end: the next window keeps that token.
+- The window that reaches the end of the recording keeps through its last token: a recording of F mel frames gives ceil(F / 4) tokens, the encoder's count (the last one is computed with the frames past the end masked, as in the reader's training data).
+
+The log-mel is computed on the whole recording and each window is a slice of those frames (token j reads frames 4j − 3 to 4j + 3, so a window cut out of exactly 30 s of audio would lose the last frame of its last token). The reader reads each window's 750 tokens as one block, both ways in time, and the kept ranges of all windows make the transcript. Measured on a Mac with the opening 10 minutes of the 54-minute fixture against the encoder run on the whole stream: 30 s windows with a 96-token overlap give a minimum token cosine of 0.99994 (0.99999994 on average); the encoder does 750 / 653 = 1.149× the work of one pass. **Windows → Change** offers the lengths the model has a file for and a few overlaps. With a file that holds both signatures, a last window with at most 10 s of audio runs on `audio_10s`.
+
+The NPU runs 10 s windows. Its compiler builds the graph on the phone, and for the 30 s graph that step needed more memory than a Galaxy S26 (12 GB) had free (6.8 GB, the run was stopped; the 10 s graph compiles). With the same contract a 10 s window keeps 153 new tokens of its 250 (1.634× the encoder work), and the reader reads 10 s at a time.
 
 ## The reader
 
-The stub reader (now): identity (the 512-d soft token is its own vector), a table of 1,000 placeholder words with random rows, and a random blank vector; a token is blank when the blank vector is nearer than every word. The words are the 1,000 most frequent words of `reader/fixtures/long-speckled-band/transcript.txt` (`tools/make_stub_vocab.py`), the random numbers a fixed SplitMix64 sequence (`tools/stub_table.py` prints the same table). The screen says "stub: words are placeholders".
+The reader is reader v1 of this repository (`reader/RELEASE.md`: a 4-layer transformer of 13.3 M parameters trained on LibriSpeech train-clean-100; greedy decoding, no language model). It reads a whole window of tokens at once, both ways in time, turns each 40 ms token into a direction in EmbeddingGemma 2's text space and scores it against the 200,000 words of `vocab.txt` (91.218 × the cosine to each word's text embedding) and against a blank: a token is its best word unless the blank scores higher, a run of the same word is one word, and blanks are dropped. Its known weaknesses (short words, homophones, read speech only) are listed in `reader/RELEASE.md`.
 
-A trained reader replaces it with three files in `/sdcard/Android/data/io.github.johnrocky.eg2transcribe/files/reader/`: `reader.tflite` (one input of T × 512 soft tokens, outputs T × d vectors and T blank logits), `word_table.npy` (float16 or float32, N × d) or `word_table.bin` (raw float16), and `vocab.txt` (N words, one per line, row order). `reader_config.json` may set `blank_logit_scale`. If anything does not match, the app keeps the stub and the Reader line says why. The word search runs on the CPU and takes tables up to 32 M values in this version.
+On the phone the reader, the word table and the choice of the best word are one LiteRT graph per window length, so the 200,000 scores of a token never leave the accelerator; the graph gives each token its best word, that word's score and the blank's score:
+
+| file | bytes | signature | inputs | outputs |
+|---|---|---|---|---|
+| `reader_w30.tflite` | 361,494,720 | `reader_30s` | `soft` [1, 750, 512], `mask` [1, 750] | `ids` [1, 750] int32, `best` [1, 750], `blank` [1, 750] |
+| `reader_w10.tflite` | 361,238,720 | `reader_10s` | `soft` [1, 250, 512], `mask` [1, 250] | `ids` [1, 250] int32, `best` [1, 250], `blank` [1, 250] |
+
+The word table sits in the graph as float16, the release's own values (`word_table.npy`, 307 MB of each file), and is used in float32; the reader itself is float32. A window with fewer real tokens (the end of a recording) is padded and masked. Put a file with the release's `vocab.txt` (1,737,588 bytes) in the app's `reader` directory:
+
+```sh
+adb shell mkdir -p /sdcard/Android/data/io.github.johnrocky.eg2transcribe/files/reader
+adb push reader_w30.tflite /sdcard/Android/data/io.github.johnrocky.eg2transcribe/files/reader/
+adb push vocab.txt /sdcard/Android/data/io.github.johnrocky.eg2transcribe/files/reader/
+```
+
+30 s windows need `reader_w30.tflite`, 10 s windows (the NPU) `reader_w10.tflite` or the 30 s file (it pads). The reader runs on the accelerator the encoder runs on (on GPU fp32 when the encoder is on the NPU); when the GPU cannot compile it, it runs on the CPU and the screen says so. The Reader line on the screen names the file and the accelerator.
+
+Without these files the app runs a stub reader and says "Stub reader: the words are placeholders": identity (the 512-d soft token is its own vector), a table of 1,000 placeholder words with random rows and a random blank vector, searched on the CPU. Its words are the 1,000 most frequent words of `reader/fixtures/long-speckled-band/transcript.txt` (`tools/make_stub_vocab.py`), its random numbers a fixed SplitMix64 sequence (`tools/stub_table.py` prints the same table). It keeps the app usable for the encoder alone.
 
 ## NPU
 
@@ -81,9 +107,23 @@ LiteRT 2.2.0 has an NPU path for the Qualcomm SM8550, SM8650, SM8750 and SM8850.
 
 The LiteRT 2.2.0 AAR declares FOREGROUND_SERVICE, WAKE_LOCK, ACCESS_NETWORK_STATE and RECEIVE_BOOT_COMPLETED for its Play model delivery, which this app does not use; they are in the merged manifest.
 
-## What it did on a Galaxy S26 (2026-10-13)
+## What it did with the reader (2026-10-14)
 
-One run of the device check below with this version: the fp16-weight pair above, the stub reader, LiteRT 2.2.0, a debug build:
+The device check below with this version (debug build, LiteRT 2.2.0), the fp16-weight 30 s encoder file and `reader_w30.tflite`. The word error rate (WER) is counted on the 54-minute LibriVox fixture (`reader/fixtures/long-speckled-band`, 9,889 reference words) with the normalization of `reader/RELEASE.md` (lower case, runs of spaces collapsed); the same windows through the reader in PyTorch on a computer give 5.784 %.
+
+| phone | encoder and reader on | input | time | speed | words |
+|---|---|---|---|---|---|
+| Pixel 8a | GPU fp32 | 54 min 17 s | 276.8 s | 11.8× real time | WER 5.784 %: the PyTorch path's word or blank on all 81,436 tokens |
+| Pixel 8a | GPU fp32 | the 20 test-clean fixtures | 46.0 s for the 20 | | 20 of 20 transcripts equal to the reader's outputs listed in `reader/RELEASE.md` |
+| Pixel 8a | CPU, 4 threads | the 20 fixtures | 130.2 s for the 20 | | 20 of 20 |
+
+Per 30 s window on the Pixel 8a, the encoder took 1.40 s and the reader 0.84 s on the GPU (median over the 54 minutes, thermal status 2), and 3.4–4.6 s and 2.1–2.8 s on the CPU. The times cover log-mel, encoder, reader and words; reading the 54-minute FLAC came on top (417.8 s on the Pixel 8a). With both models on the GPU the app peaked at 4,478,456 kB (VmHWM, 4.3 GiB). When the check ran the 20 fixtures on the GPU right after the CPU run, free memory fell to 496 MB while the reader compiled and the check stopped the app at its own 800 MB line; a fresh start passed with at least 1.68 GB free.
+
+A missing encoder file and 3 s of near silence ended with their sentences on the screen ("MODEL MISSING", "NO SPEECH").
+
+## Before the reader: a Galaxy S26 with the stub reader (2026-10-13)
+
+One run of the device check with the build before the reader (its windows stepped 654 tokens): the fp16-weight pair above, the stub reader, LiteRT 2.2.0, a debug build:
 
 | input | backend | time | speed |
 |---|---|---|---|
@@ -104,16 +144,18 @@ A start with the phone in landscape showed every row and button inside the windo
 
 ## How the device check works
 
-A start with extras runs the same code as the buttons and writes a JSON report: `adb shell am start -n io.github.johnrocky.eg2transcribe/.MainActivity --es file audio/f30.wav --es backend gpu_fp32 --es report r_gpu.json` (`--ei mic_ms 3000` records from the microphone instead; `--ez dump true` also writes the soft tokens and the per-token words). The report (`files/<report>`) holds the backend asked for and the one used, the compile time, LiteRT's own log lines about the delegate, the window count, the times, ×RT, the transcript, or the error. A script on the computer runs the same windows through the same `.tflite` with the same stub table and compares the words and the soft tokens token by token. Such a start shows over the lock screen and keeps the display on.
+A start with extras runs the same code as the buttons and writes a JSON report: `adb shell am start -n io.github.johnrocky.eg2transcribe/.MainActivity --es file audio/f30.wav --es backend gpu_fp32 --es report r_gpu.json` (`--es dir audio/fixtures20` transcribes every audio file of a directory in turn, by name, into one report with an item per file; `--ei mic_ms 3000` records from the microphone instead; `--ez dump true` also writes the soft tokens and, per token, the label, the best word and the two scores). The report (`files/<report>`) holds the backend asked for and the one used for the encoder and for the reader, the compile times, LiteRT's own log lines about the delegate, the window count, the times per window, ×RT, the transcript, or the error. On the computer, the transcripts of the 20 test-clean fixtures are compared with the reader's outputs listed in `reader/RELEASE.md`, and the 54-minute transcript's word error rate with that of the same pipeline in PyTorch. Such a start shows over the lock screen and keeps the display on.
 
 ## Code
 
-`MelFrontEnd.kt` (log-mel, written from transformers' `Gemma4AudioFeatureExtractor`), `Windowing.kt` (the window plan), `Encoder.kt` (LiteRT `CompiledModel`), `Pipeline.kt` (the window loop: log-mel of the next window while the encoder runs, reader and words on another thread), `Reader.kt` / `TfliteReader.kt` / `WordTable.kt` / `Ctc.kt` (vectors to words), `AudioDecoder.kt` / `Resampler.kt` / `Mic.kt` (input), `Jobs.kt` / `Engine.kt` / `Session.kt` / `MainActivity.kt` (the app). `./gradlew :app:testDebugUnitTest` runs the JVM tests: the log-mel against the extractor's output for two LibriSpeech utterances (`app/src/test/resources/mel`), the window plan, the word table, the stub's numbers, the collapse and the window loop with a fake encoder.
+`MelFrontEnd.kt` (log-mel, written from transformers' `Gemma4AudioFeatureExtractor`), `Windowing.kt` (the window plan), `Encoder.kt` (LiteRT `CompiledModel`), `Pipeline.kt` (the window loop: log-mel of the next window while the encoder and the reader's graph run, the labels and words on another thread), `TfliteReader.kt` (the reader graph), `Reader.kt` / `Ctc.kt` (scores to labels to words; the stub reader), `WordTable.kt` (the stub's word search), `AudioDecoder.kt` / `Resampler.kt` / `Mic.kt` (input), `Jobs.kt` / `Engine.kt` / `Session.kt` / `MainActivity.kt` (the app). `./gradlew :app:testDebugUnitTest` runs the JVM tests: the log-mel against the extractor's output for two LibriSpeech utterances (`app/src/test/resources/mel`), the window plan, the reader graph's outputs for three test-clean utterances (computed on a computer, `app/src/test/resources/reader`) read back as the `reader/RELEASE.md` transcripts, the word table, the stub's numbers, the collapse and the window loop with a fake encoder and a fake reader.
 
 ## Credits and licenses
 
 - Code: Apache-2.0.
 - EmbeddingGemma 2 (Google): Apache-2.0; use must follow the [Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy).
 - `app/src/test/resources/mel`: two LibriSpeech test-clean utterances (2300-131720-0000, 121-121726-0001) as 16-bit samples, and their log-mel rows. LibriSpeech ASR corpus, V. Panayotov, G. Chen, D. Povey, S. Khudanpur, "Librispeech: an ASR corpus based on public domain audio books", ICASSP 2015, https://www.openslr.org/12, CC BY 4.0.
+- `app/src/main/assets/examples/1284-1180-0000.flac`: LibriSpeech test-clean utterance 1284-1180-0000, the original 16 kHz FLAC (CC BY 4.0 as above).
+- `app/src/test/resources/reader`: the reader graph's outputs for three LibriSpeech test-clean utterances (1089-134686-0000, 1284-1180-0000, 2300-131720-0000), the words of `reader/vocab.txt` they name (the LibriSpeech lexicon, https://www.openslr.org/11, public domain) and the reader's transcripts from `reader/RELEASE.md`; LibriSpeech CC BY 4.0 as above.
 - `app/src/main/assets/stub_vocab.txt`: words from Project Gutenberg eBook #1661, *The Adventures of Sherlock Holmes* (public domain in the USA).
 - The idea comes from Shahir's post (@TslShahir, 2026-10-13) and the *Embedding Gemma Transcribe* Mac app. This is an independent project, not affiliated with Google.

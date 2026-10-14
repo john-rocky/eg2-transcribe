@@ -1,55 +1,109 @@
 package io.github.johnrocky.eg2transcribe
 
 import java.io.Closeable
+import java.util.concurrent.ExecutorService
 import kotlin.math.sqrt
 
 /**
- * The reader: soft tokens [n, 512] (the encoder's output) to one vector per token in the word table's space [n, dim]
- * plus a blank logit per token. A token is blank when [isBlank] says so; otherwise its word is the table row nearest
- * to its vector ([WordTable.nearest]). [Ctc] then collapses the stream.
+ * The reader: one encoder window's soft tokens to a word or a blank per token. The work comes in two parts so that the
+ * graph runs on the thread that owns the LiteRT models and the CPU work overlaps the next window:
+ * [read] runs on the encoder's thread, right after the encoder, on the whole window (the reader looks both ways within
+ * it); [Read.labels] then gives the labels of the window's kept tokens, on the decode thread.
  */
 interface Reader : Closeable {
     val name: String
-    val dim: Int
     val isStub: Boolean
 
-    /** Soft tokens soft[off until off + n * 512] to [vectors] ([n, dim] row-major) and [blank] ([n]). */
-    fun read(soft: FloatArray, off: Int, n: Int, vectors: FloatArray, blank: DoubleArray)
+    /** The window sizes, in tokens, this reader reads in one call (an encoder window of fewer tokens is padded and masked). */
+    val windowTokens: Set<Int>
 
     /**
-     * The blank decision from the token's blank logit and its best word cosine. [blankScale] null: blank when the
-     * logit is above 0; else blank when it is above blankScale x the best cosine (the stub: scale 1, its logit is the
-     * cosine to the blank vector, so a token is blank when the blank vector is nearer than every word).
+     * The window's soft tokens soft[0 until tokens * 512], the first [valid] of them real (the rest padding), to the
+     * results for its tokens [from] until [until].
      */
-    val blankScale: Double?
-
-    fun isBlank(logit: Double, bestCos: Double): Boolean = blankScale?.let { logit > it * bestCos } ?: (logit > 0.0)
+    fun read(soft: FloatArray, tokens: Int, valid: Int, from: Int, until: Int): Read
 
     override fun close() {}
 }
 
-/**
- * The placeholder reader used until a trained reader is in place: identity (d = 512), a table of [Stub.WORDS]
- * random rows for the words of `stub_vocab.txt`, and a random blank vector. Its words have nothing to do with the
- * speech; the pipeline, timing and windowing around it are the real ones.
- */
-class StubReader(private val blankVector: FloatArray) : Reader {
-    override val name = "stub"
-    override val dim = Stub.DIM
-    override val isStub = true
-    override val blankScale = 1.0
+/** One window's reader results for its kept tokens, [n] of them. */
+abstract class Read(val n: Int) {
+    /**
+     * Fills, per token: [ids] = a word (the vocabulary's line) or [Ctc.BLANK]; [word] = the best word even where the token
+     * is blank; [best] = that word's score; [blank] = the blank's score (a token is blank when blank > best).
+     */
+    abstract fun labels(ids: IntArray, word: IntArray, best: DoubleArray, blank: DoubleArray)
+}
 
-    override fun read(soft: FloatArray, off: Int, n: Int, vectors: FloatArray, blank: DoubleArray) {
-        System.arraycopy(soft, off, vectors, 0, n * dim)
+/**
+ * The trained reader's graph outputs for one window ([TfliteReader]) to labels: per token, [outIds] / [outBest] hold
+ * [slices] values (the argmax and its score within each slice of vocabSize / slices words, slice-major per token) and
+ * [outBlank] one. The slice with the largest score wins (the first on a tie = the lowest word, torch's argmax); the
+ * token is blank when its blank score is above that word's (greedy_labels' rule, compared in float32 as torch does).
+ * Tokens [from] until from + n of the window.
+ */
+class GraphRead(
+    private val outIds: IntArray,
+    private val outBest: FloatArray,
+    private val outBlank: FloatArray,
+    private val slices: Int,
+    private val vocabSize: Int,
+    private val from: Int,
+    n: Int,
+) : Read(n) {
+    override fun labels(ids: IntArray, word: IntArray, best: DoubleArray, blank: DoubleArray) {
+        val k = slices
+        val per = vocabSize / k
         for (t in 0 until n) {
-            var dot = 0.0
-            var norm2 = 0.0
-            for (i in 0 until dim) {
-                val x = soft[off + t * dim + i].toDouble()
-                dot += x * blankVector[i]
-                norm2 += x * x
+            val g = from + t
+            var s = 0
+            var b = outBest[g * k]
+            for (c in 1 until k) {
+                val v = outBest[g * k + c]
+                if (v > b) { b = v; s = c }
             }
-            blank[t] = if (norm2 == 0.0) 0.0 else dot / sqrt(norm2)
+            val w = outIds[g * k + s] + s * per
+            val bl = outBlank[g]
+            word[t] = w
+            best[t] = b.toDouble()
+            blank[t] = bl.toDouble()
+            ids[t] = if (bl > b) Ctc.BLANK else w
+        }
+    }
+}
+
+/**
+ * The placeholder reader used until a trained reader is in place: identity (d = 512), a table of [Stub.WORDS] random
+ * rows for the words of `stub_vocab.txt`, and a random blank vector; a token is blank when the blank vector is nearer
+ * than every word. Its words have nothing to do with the speech; the pipeline, timing and windowing around it are the
+ * real ones. The table scan runs on the CPU in [Read.labels] (on [pool] with [threads]).
+ */
+class StubReader(private val blankVector: FloatArray, val table: WordTable, private val pool: ExecutorService?, private val threads: Int) : Reader {
+    override val name = "stub"
+    override val isStub = true
+    override val windowTokens: Set<Int> = emptySet() // any
+
+    override fun read(soft: FloatArray, tokens: Int, valid: Int, from: Int, until: Int): Read {
+        val n = maxOf(0, minOf(until, valid) - from)
+        val rows = soft.copyOfRange(from * SOFT_DIM, (from + n) * SOFT_DIM)
+        return object : Read(n) {
+            override fun labels(ids: IntArray, word: IntArray, best: DoubleArray, blank: DoubleArray) {
+                val cos = DoubleArray(n)
+                val second = DoubleArray(n)
+                table.nearestAll(rows, n, pool, threads, word, cos, second)
+                for (t in 0 until n) {
+                    var dot = 0.0
+                    var norm2 = 0.0
+                    for (i in 0 until SOFT_DIM) {
+                        val x = rows[t * SOFT_DIM + i].toDouble()
+                        dot += x * blankVector[i]
+                        norm2 += x * x
+                    }
+                    blank[t] = if (norm2 == 0.0) 0.0 else dot / sqrt(norm2)
+                    best[t] = cos[t]
+                    ids[t] = if (word[t] < 0 || blank[t] > cos[t]) Ctc.BLANK else word[t]
+                }
+            }
         }
     }
 }
@@ -81,13 +135,15 @@ object Stub {
         return WordTable.fromRaw(vocab, DIM, uniform(WORDS * DIM))
     }
 
-    fun reader(): StubReader {
+    fun blankVector(): FloatArray {
         val b = uniform(DIM, skip = WORDS.toLong() * DIM)
         var s = 0.0
         for (x in b) s += x.toDouble() * x
         val norm = sqrt(s)
-        return StubReader(FloatArray(DIM) { (b[it] / norm).toFloat() })
+        return FloatArray(DIM) { (b[it] / norm).toFloat() }
     }
+
+    fun reader(vocab: List<String>, pool: ExecutorService?, threads: Int): StubReader = StubReader(blankVector(), table(vocab), pool, threads)
 
     private val GAMMA = 0x9E3779B97F4A7C15uL.toLong()
     private val M1 = 0xBF58476D1CE4E5B9uL.toLong()

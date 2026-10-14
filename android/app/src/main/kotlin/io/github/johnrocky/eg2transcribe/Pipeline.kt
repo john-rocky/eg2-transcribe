@@ -23,17 +23,15 @@ class EncoderOutput(val soft: FloatArray, val mask: FloatArray, val ms: Double)
 
 /**
  * PCM to words, window by window ([WindowPlan]): the log-mel of window k + 1 is computed on [prep] while the encoder
- * runs window k on the calling thread (the thread that owns the encoder), and the reader, the table scan and the CTC
- * collapse of window k run on [decode] (one thread, so words arrive in order) with the scan split over [scan].
+ * and then the reader's graph ([Reader.read]) run window k on the calling thread (the thread that owns the LiteRT
+ * models), and the labels and the CTC collapse of window k run on [decode] (one thread, so words arrive in order).
  */
 class Pipeline(
     private val encoder: EncoderRunner,
     private val reader: Reader,
-    private val table: WordTable,
+    private val vocab: List<String>,
     private val prep: ExecutorService,
     private val decode: ExecutorService,
-    private val scan: ExecutorService?,
-    private val scanThreads: Int,
 ) {
     interface Listener {
         /** After window [k] of [count]: [audioSeconds] of the recording are encoded, [elapsedMs] since the start. */
@@ -50,6 +48,7 @@ class Pipeline(
         val plan: WindowPlan,
         val words: List<Word>,
         val encoderMs: List<Double>,
+        val readerMs: List<Double>,
         val windowFrames: List<Int>,
         val melMs: Double,
         val decodeMs: Double,
@@ -63,10 +62,11 @@ class Pipeline(
         require(windowFrames in encoder.windowSizes) { "the encoder has no ${windowFrames / 100} s signature (has ${encoder.windowSizes.sorted().map { it / 100 }} s)" }
         val t0 = System.nanoTime()
         val plan = WindowPlan(MelFrontEnd.frames(pcm.length), windowFrames, overlapTokens)
-        val ctc = Ctc(table.vocab)
+        val ctc = Ctc(vocab)
         val words = ArrayList<Word>()
         val warnings = ArrayList<String>()
         val encoderMs = ArrayList<Double>()
+        val readerMs = ArrayList<Double>()
         val usedFrames = ArrayList<Int>()
         var melNs = 0L
         var decodeNs = 0L
@@ -88,19 +88,16 @@ class Pipeline(
             return slot
         }
 
-        fun decodeWindow(k: Int, soft: FloatArray, valid: Int) {
+        fun decodeWindow(k: Int, read: Read, soft: FloatArray) {
             val a = System.nanoTime()
             val from = plan.keepFrom(k)
-            val n = minOf(valid, plan.keepUntil(k)) - from
+            val n = read.n
             if (n <= 0) return
-            val vectors = FloatArray(n * reader.dim)
+            val ids = IntArray(n)
+            val word = IntArray(n)
+            val best = DoubleArray(n)
             val blank = DoubleArray(n)
-            reader.read(soft, from * SOFT_DIM, n, vectors, blank)
-            val rows = IntArray(n)
-            val cos = DoubleArray(n)
-            val second = DoubleArray(n)
-            table.nearestAll(vectors, n, scan, scanThreads, rows, cos, second)
-            val ids = IntArray(n) { t -> if (rows[t] < 0 || reader.isBlank(blank[t], cos[t])) Ctc.BLANK else rows[t] }
+            read.labels(ids, word, best, blank)
             blanks += ids.count { it == Ctc.BLANK }
             val first = plan.firstToken(k) + from
             val fresh = ctc.feed(ids, n, first)
@@ -111,10 +108,10 @@ class Pipeline(
                 out.write(b.array())
             }
             dump?.tokens?.let { out ->
-                // Per token: global index (int32), row or -1 (int32), best cos, second cos, blank logit (float64).
-                val b = ByteBuffer.allocate(n * 32).order(ByteOrder.LITTLE_ENDIAN)
+                // Per token (TOKEN_RECORD): global index, label (-1 blank), best word (int32), its score, blank score (float64).
+                val b = ByteBuffer.allocate(n * TOKEN_RECORD_BYTES).order(ByteOrder.LITTLE_ENDIAN)
                 for (t in 0 until n) {
-                    b.putInt(first + t); b.putInt(ids[t]); b.putDouble(cos[t]); b.putDouble(second[t]); b.putDouble(blank[t])
+                    b.putInt(first + t); b.putInt(ids[t]); b.putInt(word[t]); b.putDouble(best[t]); b.putDouble(blank[t])
                 }
                 out.write(b.array())
             }
@@ -152,9 +149,11 @@ class Pipeline(
                     warnings += "window $k: the encoder marked $valid tokens valid, the plan expects $expected"
                     valid = minOf(valid, expected)
                 }
+                val r0 = System.nanoTime()
+                val read = reader.read(out.soft, frames / 4, valid, plan.keepFrom(k), plan.keepUntil(k))
+                readerMs += (System.nanoTime() - r0) / 1e6
                 while (pending.size >= 2) pending.removeFirst().get() // bounded queue: at most 2 windows wait for decoding
-                val v = valid
-                pending.addLast(decode.submit { decodeWindow(k, out.soft, v) })
+                pending.addLast(decode.submit { decodeWindow(k, read, out.soft) })
                 val done = plan.kept(k).last + 1
                 listener.onWindow(k, plan.count, done * Ctc.SECONDS_PER_TOKEN, (System.nanoTime() - t0) / 1e6)
             }
@@ -167,7 +166,11 @@ class Pipeline(
         dump?.soft?.flush()
         dump?.tokens?.flush()
         val elapsed = (System.nanoTime() - t0) / 1e6
-        return Result(plan, words, encoderMs, usedFrames, melNs / 1e6, decodeNs / 1e6, elapsed, cancelled, blanks, warnings)
+        return Result(plan, words, encoderMs, readerMs, usedFrames, melNs / 1e6, decodeNs / 1e6, elapsed, cancelled, blanks, warnings)
+    }
+
+    companion object {
+        const val TOKEN_RECORD_BYTES = 28
+        const val TOKEN_RECORD = "int32 global token, int32 label (-1 blank), int32 best word, float64 best word score, float64 blank score; little-endian"
     }
 }
-

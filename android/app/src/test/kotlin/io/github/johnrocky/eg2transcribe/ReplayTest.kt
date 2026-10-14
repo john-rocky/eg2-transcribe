@@ -32,12 +32,12 @@ class ReplayTest {
         assumeTrue("set -Peg2.replay=<dir> to run", root != null && root.isDirectory)
         val dirs = root!!.listFiles { f -> File(f, "plan.txt").isFile }!!.sortedBy { it.name }
         assertTrue("no replay inputs in $root", dirs.isNotEmpty())
-        val table = Stub.table(WordTable.readVocab(File("src/main/assets/stub_vocab.txt")))
+        val vocab = WordTable.readVocab(File("src/main/assets/stub_vocab.txt"))
         val prep = Executors.newSingleThreadExecutor()
         val decode = Executors.newSingleThreadExecutor()
         val scan = Executors.newFixedThreadPool(4)
         try {
-            for (d in dirs) replayOne(d, table, prep, decode, scan)
+            for (d in dirs) replayOne(d, vocab, prep, decode, scan)
         } finally {
             prep.shutdown(); decode.shutdown(); scan.shutdown()
         }
@@ -49,7 +49,7 @@ class ReplayTest {
         return FloatArray(count).also { f.get(it) }
     }
 
-    private fun replayOne(d: File, table: WordTable, prep: ExecutorService, decode: ExecutorService, scan: ExecutorService) {
+    private fun replayOne(d: File, vocab: List<String>, prep: ExecutorService, decode: ExecutorService, scan: ExecutorService) {
         val lines = File(d, "plan.txt").readLines()
         val (label, samples, frames, window, overlap) = lines[0].split(" ")
         val calls = lines[1].trim().split(" ").map { it.toInt() }
@@ -80,7 +80,7 @@ class ReplayTest {
         val src = Pcm16File(File(d, "pcm16"))
         val t0 = System.nanoTime()
         val r = try {
-            Pipeline(enc, Stub.reader(), table, prep, decode, scan, 4).run(src, plan.windowFrames, plan.overlapTokens, object : Pipeline.Listener {}, dump = Pipeline.Dump(softOut, tokens))
+            Pipeline(enc, Stub.reader(vocab, scan, 4), vocab, prep, decode).run(src, plan.windowFrames, plan.overlapTokens, object : Pipeline.Listener {}, dump = Pipeline.Dump(softOut, tokens))
         } finally {
             tokens.close(); softOut.close(); src.close(); melRef.close(); soft.close(); maskRef.close()
         }

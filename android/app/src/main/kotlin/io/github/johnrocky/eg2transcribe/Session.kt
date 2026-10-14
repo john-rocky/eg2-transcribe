@@ -17,6 +17,10 @@ object Session {
     @Volatile var overlapTokens = WindowPlan.DEFAULT_OVERLAP
     @Volatile var minRms = Engine.MIN_RMS
 
+    /** The recording harness (launch extras): the file picker's first folder, and a report for a file picked by hand. */
+    @Volatile var pickerDir: String? = null
+    @Volatile var pickerReport: String? = null
+
     // State.
     @Volatile var pill = "STARTING"
     @Volatile var tone = Tone.IDLE

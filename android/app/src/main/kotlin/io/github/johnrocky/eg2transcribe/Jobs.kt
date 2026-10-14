@@ -23,35 +23,44 @@ object Jobs {
 
     fun modelChoice(context: Context): ModelChoice = ModelChoice.of(Engine.filesDir(context), Session.modelName)
 
-    /** Loads the reader and the encoder for the current settings (work thread). True when the encoder is ready. */
+    /** The window length a run with encoder [l] uses: the setting when the encoder has a file for it, else its longest. */
+    fun windowFor(l: Engine.Loaded): Int = if (Session.windowFrames in l.encoder.windowSizes) Session.windowFrames else l.encoder.windowSizes.max()
+
+    /** Loads the encoder and then the reader for the current settings (work thread). True when both are ready. */
     fun loadModel(context: Context): Boolean {
-        val readers = Engine.ensureReader(context)
-        Session.readerLine = readers.note
-        Session.readerIsStub = readers.reader.isStub
         val choice = modelChoice(context)
         Session.modelLine = choice.describe()
-        if (Engine.isLoaded(choice, Session.backend, Session.windowFrames) != null) return true
+        val have = Engine.isLoaded(choice, Session.backend, Session.windowFrames)
+        if (have != null && Engine.isReaderLoaded(context, have.encoder.backend, windowFor(have))) return true
         Session.loading = true
         Session.loadingSince = System.nanoTime()
         Session.pill = "LOADING MODEL"
         Session.tone = Session.Tone.WORK
-        Session.status = "Compiling the encoder for ${Session.backend.label}…"
-        Session.fallbackLine = null
+        Session.status = if (have == null) "Compiling the encoder for ${Session.backend.label}…" else "Loading the reader…"
+        if (have == null) Session.fallbackLine = null
         Session.changed()
         try {
-            val l = Engine.ensureEncoder(context, choice, Session.backend, Session.windowFrames) { stage ->
+            val l = have ?: Engine.ensureEncoder(context, choice, Session.backend, Session.windowFrames) { stage ->
+                Session.status = stage
+                Session.changed()
+            }.also { l ->
+                val e = l.encoder
+                val npu = l.npu
+                Session.engineLine = "Encoder on ${e.backend.label}" + (if (e.backend == Backend.CPU) " (${e.threads} threads)" else "") +
+                    " · " + (if (e.backend == Backend.NPU && npu?.prepared?.cachedBefore == true) "loaded from its cache in ${secs(e.compileMs)}"
+                    else "compiled in ${secs(e.compileMs)}" + (if (e.backend == Backend.NPU) " (first time; later starts read the cache)" else "")) +
+                    " · ${e.file.name} (${e.signatureNames.joinToString(", ")})"
+                Session.fallbackLine = l.fallback
+                Log.i(TAG, "ENGINE_READY requested=${l.requested.id} used=${e.backend.id} compile_ms=${fmt(e.compileMs)} warmup_ms=${e.warmupMs} model=${e.file.name} bytes=${e.file.length()} fallback=${l.fallback != null}" +
+                    (npu?.let { " npu_dispatch=${it.dispatch} npu_cached_before=${it.prepared?.cachedBefore} npu_cache_bytes=${it.cacheBytesAfter} npu_error=${it.error}" } ?: ""))
+            }
+            val rs = Engine.ensureReader(context, l.encoder.backend, windowFor(l)) { stage ->
                 Session.status = stage
                 Session.changed()
             }
-            val e = l.encoder
-            val npu = l.npu
-            Session.engineLine = "Encoder on ${e.backend.label}" + (if (e.backend == Backend.CPU) " (${e.threads} threads)" else "") +
-                " · " + (if (e.backend == Backend.NPU && npu?.prepared?.cachedBefore == true) "loaded from its cache in ${secs(e.compileMs)}"
-                else "compiled in ${secs(e.compileMs)}" + (if (e.backend == Backend.NPU) " (first time; later starts read the cache)" else "")) +
-                " · ${e.file.name} (${e.signatureNames.joinToString(", ")})"
-            Session.fallbackLine = l.fallback
-            Log.i(TAG, "ENGINE_READY requested=${l.requested.id} used=${e.backend.id} compile_ms=${fmt(e.compileMs)} warmup_ms=${e.warmupMs} model=${e.file.name} bytes=${e.file.length()} fallback=${l.fallback != null}" +
-                (npu?.let { " npu_dispatch=${it.dispatch} npu_cached_before=${it.prepared?.cachedBefore} npu_cache_bytes=${it.cacheBytesAfter} npu_error=${it.error}" } ?: ""))
+            Session.readerLine = rs.note + (rs.tflite?.let { " · compiled in ${secs(it.compileMs)}" } ?: "")
+            Session.readerIsStub = rs.reader.isStub
+            if (rs.fallback != null) Session.fallbackLine = listOfNotNull(l.fallback, rs.fallback).joinToString(" ")
             Session.pill = "READY"
             Session.tone = Session.Tone.IDLE
             Session.status = if (Session.lastInput == null) "Record, or open an audio file." else "Ready."
@@ -103,8 +112,11 @@ object Jobs {
     /** /storage/emulated/0/... as adb's /sdcard/... */
     fun sdcard(f: File): String = f.absolutePath.replace(Regex("^/storage/emulated/0"), "/sdcard")
 
-    /** Decodes an audio file, then transcribes it. */
-    fun transcribeUri(context: Context, uri: Uri, label: String, req: Request, cancel: AtomicBoolean) {
+    /** Audio file extensions the batch mode reads from a directory. */
+    private val AUDIO = setOf("flac", "wav", "mp3", "m4a", "ogg", "opus", "aac")
+
+    /** Decodes [uri] to cache/input.pcm: the input, or the outcome that ends the job (cancelled, unreadable). */
+    private fun decodeFile(context: Context, uri: Uri, label: String, cancel: AtomicBoolean): Pair<Session.Input?, Outcome?> {
         Session.lastInput = null // input.pcm is about to be overwritten
         Session.decoding = true
         Session.pill = "READING FILE"
@@ -122,8 +134,7 @@ object Jobs {
         } catch (e: Throwable) {
             Session.decoding = false
             val text = if (cancel.get()) "Stopped." else "This file could not be read: ${e.message ?: e.javaClass.simpleName}"
-            finish(context, req, if (cancel.get()) "cancelled" else "decode_failed", if (cancel.get()) "STOPPED" else "CANNOT READ", text, input = jsonOf("source" to "file", "label" to label))
-            return
+            return null to Outcome(if (cancel.get()) "cancelled" else "decode_failed", if (cancel.get()) "STOPPED" else "CANNOT READ", text, jsonOf("source" to "file", "label" to label))
         }
         Session.decoding = false
         val json = jsonOf(
@@ -133,8 +144,63 @@ object Jobs {
             "expected_samples" to decoded.expectedSamples, "missing_samples" to decoded.expectedSamples?.let { it - decoded.samples },
         )
         Log.i(TAG, "INPUT source=file label=$label samples=${decoded.samples} expected=${decoded.expectedSamples} format=${decoded.format} rate=${decoded.sourceRate} channels=${decoded.channels} resampled=${decoded.resampled} decode_ms=${fmt(decoded.ms)}")
-        run(context, Session.Input(pcm, label, json), req)
+        return Session.Input(pcm, label, json) to null
     }
+
+    /** Decodes an audio file, then transcribes it. */
+    fun transcribeUri(context: Context, uri: Uri, label: String, req: Request, cancel: AtomicBoolean) {
+        val (input, failed) = decodeFile(context, uri, label, cancel)
+        if (input == null) {
+            val o = failed!!
+            finish(context, req, o.status, o.pill, o.text, input = o.input)
+            return
+        }
+        run(context, input, req)
+    }
+
+    /**
+     * Every audio file of [dir] in turn, by name, with the same model: one report with an item per file (its status,
+     * transcript, timing; per-file dumps `<report stem>.<file stem>.tokens.bin` / `.soft.f32` with [Request.dump]).
+     * The device check's fixture mode (the 20 test-clean utterances in one run).
+     */
+    fun transcribeDir(context: Context, dir: File, req: Request, cancel: AtomicBoolean) {
+        val files = dir.listFiles { f -> f.isFile && f.extension.lowercase() in AUDIO }?.sortedBy { it.name } ?: emptyList()
+        val dirJson = jsonOf("source" to "dir", "label" to dir.name, "files" to files.size)
+        if (files.isEmpty()) {
+            finish(context, req, "no_files", "NO FILES", "No audio files in ${dir.name}.", input = dirJson)
+            return
+        }
+        val t0 = System.nanoTime()
+        val items = org.json.JSONArray()
+        var ok = 0
+        var last: Outcome? = null
+        for ((i, f) in files.withIndex()) {
+            if (cancel.get() || Engine.cancel.get()) break
+            Log.i(TAG, "DIR_FILE ${i + 1}/${files.size} ${f.name}")
+            val (input, failed) = decodeFile(context, Uri.fromFile(f), f.name, cancel)
+            val o = failed ?: transcribeOnce(context, input!!, req.dump, req.report?.removeSuffix(".json")?.let { "$it.${f.nameWithoutExtension}" })
+            last = o
+            val x = o.extra
+            items.put(jsonOf(
+                "file" to f.name, "status" to o.status, "text" to o.text, "input" to (input?.json ?: o.input),
+                "transcript" to x?.optString("transcript"), "words" to x?.optInt("words"), "tokens" to x?.optInt("tokens"),
+                "window" to x?.optJSONObject("window"), "timing" to x?.optJSONObject("timing"), "dump" to x?.opt("dump"),
+            ))
+            if (o.status == "ok") ok++
+            if (o.status in STOPPING) break
+        }
+        val ms = (System.nanoTime() - t0) / 1e6
+        val status = if (ok == files.size) "ok" else if (ok > 0) "partial" else last?.status ?: "failed"
+        val text = "$ok of ${files.size} files transcribed in ${secs(ms)}."
+        finish(
+            context, req, status, if (ok == files.size) "DONE" else "PARTLY DONE", text, input = dirJson, loaded = Engine.loaded,
+            extra = jsonOf("items" to items, "dir_timing" to jsonOf("total_ms" to ms, "files" to files.size, "ok" to ok)),
+            tone = if (ok == files.size) Session.Tone.OK else Session.Tone.WARN,
+        )
+    }
+
+    /** Outcomes after which the next file of a batch would fail the same way. */
+    private val STOPPING = setOf("load_failed", "model_missing", "compile_failed", "run_failed", "not_finite", "not_an_encoder", "cancelled")
 
     /** Records until [stop] (or [ms] when set, the check's press without a finger), then transcribes. */
     fun transcribeMic(context: Context, ms: Long?, req: Request, stop: AtomicBoolean) {
@@ -178,15 +244,26 @@ object Jobs {
         run(context, input, req)
     }
 
+    /** How a transcription ended: what [finish] shows and reports. */
+    private class Outcome(
+        val status: String, val pill: String, val text: String, val input: JSONObject? = null, val extra: JSONObject? = null,
+        val tone: Session.Tone = Session.Tone.LIVE, val keepScreen: Boolean = false, val loaded: Engine.Loaded? = null,
+    )
+
     /** Checks length and loudness, loads the model, runs the pipeline and reports. */
     private fun run(context: Context, input: Session.Input, req: Request) {
+        val o = transcribeOnce(context, input, req.dump, req.report?.removeSuffix(".json"))
+        finish(context, req, o.status, o.pill, o.text, input = input.json, loaded = o.loaded, extra = o.extra, tone = o.tone, keepScreen = o.keepScreen)
+    }
+
+    /** One transcription of [input]; [dumpStem] = the per-token files' name without extension (with [dump]). */
+    private fun transcribeOnce(context: Context, input: Session.Input, dump: Boolean, dumpStem: String?): Outcome {
         Session.lastInput = input
         Session.progress = 0.0
         Session.progressLine = ""
         Session.detailLine = ""
         val pcm = try { Pcm16File(input.pcm) } catch (e: Throwable) {
-            finish(context, req, "decode_failed", "CANNOT READ", "The audio could not be opened: ${e.message}", input = input.json)
-            return
+            return Outcome("decode_failed", "CANNOT READ", "The audio could not be opened: ${e.message}", input.json)
         }
         pcm.use { src ->
             val seconds = src.seconds
@@ -195,21 +272,18 @@ object Jobs {
             Session.inputLine = "${input.label} · ${Session.clock(seconds)}" + (input.json.optString("format").takeIf { it.isNotEmpty() }?.let { " · $it" } ?: "") +
                 (if (input.json.optBoolean("resampled")) " (resampled to 16 kHz)" else "")
             if (seconds < Engine.MIN_SECONDS) {
-                finish(context, req, "too_short", "TOO SHORT", "The audio is ${"%.1f".format(Locale.US, seconds)} s long; at least ${Engine.MIN_SECONDS.toInt()} s is needed.", input = input.json)
-                return
+                return Outcome("too_short", "TOO SHORT", "The audio is ${"%.1f".format(Locale.US, seconds)} s long; at least ${Engine.MIN_SECONDS.toInt()} s is needed.", input.json)
             }
             if (rms < Session.minRms) {
-                finish(context, req, "no_speech", "NO SPEECH", "No speech detected: the audio is at ${dbfs(rms)}, below the ${dbfs(Session.minRms)} floor. Speak closer to the microphone, or open another file.", input = input.json)
-                return
+                return Outcome("no_speech", "NO SPEECH", "No speech detected: the audio is at ${dbfs(rms)}, below the ${dbfs(Session.minRms)} floor. Speak closer to the microphone, or open another file.", input.json)
             }
             if (!loadModel(context)) {
                 val e = lastLoadError
-                finish(context, req, e?.code ?: "load_failed", Session.pill, Session.status, input = input.json, keepScreen = true)
-                return
+                return Outcome(e?.code ?: "load_failed", Session.pill, Session.status, input.json, keepScreen = true)
             }
             val loaded = Engine.loaded!!
-            val readers = Engine.ensureReader(context)
-            val windowFrames = if (Session.windowFrames in loaded.encoder.windowSizes) Session.windowFrames else loaded.encoder.windowSizes.max()
+            val readers = Engine.readers!!
+            val windowFrames = windowFor(loaded)
             val overlap = Session.overlapTokens.coerceAtMost(WindowPlan.maxOverlap(windowFrames))
             Session.clearTranscript()
             Session.transcribing = true
@@ -219,9 +293,8 @@ object Jobs {
             Session.progress = 0.0
             Session.detailLine = ""
             Session.changed()
-            val stem = req.report?.removeSuffix(".json")
-            val dumpSoft = if (req.dump && stem != null) File(Engine.filesDir(context), "$stem.soft.f32") else null
-            val dumpTokens = if (req.dump && stem != null) File(Engine.filesDir(context), "$stem.tokens.bin") else null
+            val dumpSoft = if (dump && dumpStem != null) File(Engine.filesDir(context), "$dumpStem.soft.f32") else null
+            val dumpTokens = if (dump && dumpStem != null) File(Engine.filesDir(context), "$dumpStem.tokens.bin") else null
             val softOut = dumpSoft?.let { it.parentFile?.mkdirs(); BufferedOutputStream(FileOutputStream(it), 1 shl 20) }
             val tokOut = dumpTokens?.let { BufferedOutputStream(FileOutputStream(it), 1 shl 16) }
             val result = try {
@@ -242,8 +315,7 @@ object Jobs {
             } catch (e: Throwable) {
                 Session.transcribing = false
                 Log.e(TAG, "ERROR run ${e.message}", e)
-                finish(context, req, "run_failed", "FAILED", "The encoder failed on ${loaded.encoder.backend.label}: ${e.javaClass.simpleName}: ${e.message}", input = input.json, loaded = loaded)
-                return
+                return Outcome("run_failed", "FAILED", "The encoder or the reader failed on ${loaded.encoder.backend.label}: ${e.javaClass.simpleName}: ${e.message}", input.json, loaded = loaded)
             } finally {
                 runCatching { softOut?.close() }
                 runCatching { tokOut?.close() }
@@ -252,11 +324,11 @@ object Jobs {
             val r = result
             val xrt = seconds / (r.elapsedMs / 1000.0)
             val decodeMs = input.json.optDouble("decode_ms", 0.0)
-            val enc = r.encoderMs.sorted()
-            val median = if (enc.isEmpty()) 0.0 else enc[enc.size / 2]
+            val median = median(r.encoderMs)
+            val readerMedian = median(r.readerMs)
             Session.progressLine = "Window ${r.encoderMs.size} of ${r.plan.count} · ${secs(r.elapsedMs)} · ${"%.1f".format(Locale.US, xrt)}× real time"
-            Session.detailLine = "${r.plan.count} windows of ${windowFrames / 100} s (overlap $overlap tokens) · encoder median ${fmt(median)} ms a window · " +
-                "log-mel ${secs(r.melMs)} · reader + words ${secs(r.decodeMs)} · ${r.plan.tokens} tokens · ${r.words.size} words" +
+            Session.detailLine = "${r.plan.count} windows of ${windowFrames / 100} s (overlap $overlap tokens) · encoder median ${fmt(median)} ms, reader median ${fmt(readerMedian)} ms a window · " +
+                "log-mel ${secs(r.melMs)} · labels ${secs(r.decodeMs)} · ${r.plan.tokens} tokens · ${r.words.size} words" +
                 (if (decodeMs > 0) " · file read ${secs(decodeMs)}" else "")
             val text = r.words.joinToString(" ") { it.text }
             val status = if (r.cancelled) "cancelled" else "ok"
@@ -266,20 +338,28 @@ object Jobs {
             val report = jsonOf(
                 "window" to jsonOf(
                     "frames" to windowFrames, "seconds" to windowFrames / 100, "overlap_tokens" to overlap, "overlap_s" to overlap * 0.04,
-                    "stride_frames" to r.plan.stride, "count" to r.plan.count, "run" to r.encoderMs.size, "compute_factor" to r.plan.computeFactor,
+                    "drop_last_tokens" to r.plan.dropLast, "step_tokens" to r.plan.step, "stride_frames" to r.plan.stride,
+                    "count" to r.plan.count, "run" to r.encoderMs.size, "compute_factor" to r.plan.computeFactor,
                     "frames_per_call" to jsonArray(r.windowFrames),
                 ),
                 "timing" to jsonOf(
                     "transcribe_ms" to r.elapsedMs, "xrt" to xrt, "xrt_with_file_read" to seconds / ((r.elapsedMs + decodeMs) / 1000.0),
-                    "encoder_ms" to jsonArray(r.encoderMs), "encoder_ms_median" to median, "mel_ms" to r.melMs, "reader_words_ms" to r.decodeMs,
-                    "file_read_ms" to decodeMs,
+                    "encoder_ms" to jsonArray(r.encoderMs), "encoder_ms_median" to median,
+                    "reader_ms" to jsonArray(r.readerMs), "reader_ms_median" to readerMedian,
+                    "mel_ms" to r.melMs, "labels_ms" to r.decodeMs, "file_read_ms" to decodeMs,
                 ),
                 "tokens" to r.plan.tokens, "blanks" to r.blanks, "words" to r.words.size, "transcript" to text,
                 "warnings" to jsonArray(r.warnings),
-                "dump" to if (dumpSoft != null) jsonOf("soft" to dumpSoft.name, "tokens" to dumpTokens?.name, "token_record" to "int32 global index, int32 row (-1 blank), float64 best cos, float64 second cos, float64 blank logit; little-endian") else null,
+                "dump" to if (dumpSoft != null) jsonOf("soft" to dumpSoft.name, "tokens" to dumpTokens?.name, "token_record" to Pipeline.TOKEN_RECORD) else null,
             )
-            finish(context, req, status, pill, line, input = input.json, loaded = loaded, extra = report, tone = if (r.cancelled) Session.Tone.WARN else Session.Tone.OK)
+            return Outcome(status, pill, line, input.json, report, if (r.cancelled) Session.Tone.WARN else Session.Tone.OK, loaded = loaded)
         }
+    }
+
+    private fun median(xs: List<Double>): Double {
+        if (xs.isEmpty()) return 0.0
+        val s = xs.sorted()
+        return s[s.size / 2]
     }
 
     /** Sets the screen's end state, logs RESULT and writes the run report when one was asked for. */
@@ -320,7 +400,16 @@ object Jobs {
                 },
             ),
             "delegate_lines" to l?.delegateLines?.let { jsonArray(it) },
-            "reader" to readers?.let { jsonOf("name" to it.reader.name, "stub" to it.reader.isStub, "dim" to it.reader.dim, "words" to it.table.size, "note" to it.note) },
+            "reader" to readers?.let { rs ->
+                val t = rs.tflite
+                jsonOf(
+                    "name" to rs.reader.name, "stub" to rs.reader.isStub, "words" to rs.vocab.size, "note" to rs.note,
+                    "file" to t?.file?.name, "bytes" to t?.file?.length(), "requested" to rs.requested?.id, "used" to t?.backend?.id,
+                    "fallback" to rs.fallback, "tokens" to t?.tokens, "slices" to t?.slices, "compile_ms" to t?.compileMs,
+                    "warmup_ms" to t?.warmupMs, "threads" to t?.threads, "window_frames" to rs.windowFrames,
+                    "files" to jsonArray(rs.key.map { (n, b) -> jsonOf("name" to n, "bytes" to b) }),
+                )
+            },
             "memory" to Engine.memoryJson(),
         )
         extra?.keys()?.forEach { k -> o.put(k, extra.get(k)) }

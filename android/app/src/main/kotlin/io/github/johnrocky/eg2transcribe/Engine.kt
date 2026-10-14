@@ -70,7 +70,22 @@ object Engine {
         val error: String?,
     )
 
-    class ReaderSet(val reader: Reader, val table: WordTable, val note: String)
+    /**
+     * The reader in use and its vocabulary. [requested] = the accelerator asked for (the encoder's), [fallback] = why
+     * it runs elsewhere; [note] = the screen's line.
+     */
+    class ReaderSet(
+        val reader: Reader,
+        val vocab: List<String>,
+        val note: String,
+        val requested: Backend?,
+        val fallback: String?,
+        /** The window length (frames) this set was picked for, and the files it was picked from (name -> bytes). */
+        val windowFrames: Int,
+        val key: List<Pair<String, Long>>,
+    ) {
+        val tflite: TfliteReader? get() = reader as? TfliteReader
+    }
 
     @Volatile var loaded: Loaded? = null
         private set
@@ -79,39 +94,82 @@ object Engine {
 
     fun filesDir(context: Context): File = requireNotNull(context.getExternalFilesDir(null)) { "no external files dir" }
 
-    /** The reader in files/reader/ when it is complete and readable, else the stub (with the reason in [ReaderSet.note]). */
-    fun ensureReader(context: Context): ReaderSet = readers ?: synchronized(this) {
-        readers ?: loadReader(context).also { readers = it }
+    /** The app's reader directory: files/reader/ (reader_w30.tflite, reader_w10.tflite, vocab.txt). */
+    fun readerDir(context: Context): File = File(filesDir(context), "reader")
+
+    /** What a reader load depends on: the files of the reader dir (name, size). */
+    private fun readerKey(dir: File): List<Pair<String, Long>> =
+        (TfliteReader.FILES.values + "vocab.txt").map { File(dir, it) }.filter { it.isFile }.map { it.name to it.length() }
+
+    /** The accelerator the reader runs on for an encoder on [encoder]: the same one, the NPU's encoder gets GPU fp32. */
+    fun readerBackend(encoder: Backend): Backend = if (encoder == Backend.NPU) Backend.GPU_FP32 else encoder
+
+    /**
+     * The trained reader of files/reader/ for windows of [windowFrames] frames, compiled for [backend] (a GPU -> the
+     * CPU when it cannot compile or run it), or the stub with the reason in [ReaderSet.note] when the files are not
+     * all there or cannot be used. Kept while the files, the accelerator and the window length stay the same.
+     */
+    fun ensureReader(context: Context, backend: Backend, windowFrames: Int, onStage: (String) -> Unit = {}): ReaderSet {
+        val dir = readerDir(context)
+        val key = readerKey(dir)
+        readers?.takeIf { current(it, key, backend, windowFrames) }?.let { return it }
+        closeReader()
+        return loadReader(context, dir, key, backend, windowFrames, onStage).also { readers = it }
     }
 
-    private fun loadReader(context: Context): ReaderSet {
-        val dir = File(filesDir(context), "reader")
-        val files = listOf("reader.tflite", "vocab.txt")
-        val table = listOf("word_table.npy", "word_table.bin").map { File(dir, it) }.firstOrNull { it.isFile }
-        var why = "no trained reader yet"
-        if (dir.isDirectory && (File(dir, "reader.tflite").isFile || table != null)) {
-            val missing = files.filterNot { File(dir, it).isFile } + (if (table == null) listOf("word_table.npy or word_table.bin") else emptyList())
+    private fun loadReader(context: Context, dir: File, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int, onStage: (String) -> Unit): ReaderSet {
+        val vocabFile = File(dir, "vocab.txt")
+        val file = TfliteReader.fileFor(dir, windowFrames)
+        var why = "no trained reader in files/reader/"
+        if (dir.isDirectory && (file != null || vocabFile.isFile || TfliteReader.FILES.values.any { File(dir, it).isFile })) {
+            val missing = listOfNotNull(
+                if (file == null) TfliteReader.FILES[windowFrames] ?: TfliteReader.FILES.values.first() else null,
+                if (!vocabFile.isFile) "vocab.txt" else null,
+            )
             if (missing.isEmpty()) {
                 try {
-                    val t = WordTable.load(table!!, File(dir, "vocab.txt"))
-                    val r = LiteRt.call { TfliteReader.open(context, dir, CPU_THREADS) }
-                    if (r.dim != t.dim) {
-                        LiteRt.call { r.close() }
-                        throw IllegalArgumentException("reader.tflite gives ${r.dim}-d vectors, the word table has ${t.dim}")
+                    val vocab = WordTable.readVocab(vocabFile)
+                    var fallback: String? = null
+                    val want = readerBackend(backend)
+                    onStage("Compiling the reader for ${want.label}…")
+                    val r = try {
+                        TfliteReader.open(context, file!!, want, vocab.size, CPU_THREADS)
+                    } catch (e: EncoderException) {
+                        if (!want.isGpu || e.code !in setOf("compile_failed", "run_failed", "not_finite")) throw e
+                        fallback = "${e.text}. The reader runs on the CPU instead."
+                        Log.w(TAG, "FALLBACK reader ${want.id} -> cpu: ${e.text}", e.cause)
+                        onStage("Compiling the reader for the CPU…")
+                        TfliteReader.open(context, file!!, Backend.CPU, vocab.size, CPU_THREADS)
                     }
-                    Log.i(TAG, "READER tflite dim=${r.dim} words=${t.size}")
-                    return ReaderSet(r, t, "reader.tflite, ${t.size} words")
+                    Log.i(TAG, "READER file=${r.file.name} bytes=${r.file.length()} backend=${r.backend.id} tokens=${r.tokens} slices=${r.slices} words=${vocab.size} compile_ms=${Jobs.fmt(r.compileMs)} warmup_ms=${Jobs.fmt(r.warmupMs)} fallback=${fallback != null}")
+                    val note = "Reader v1 on ${r.backend.label} · ${r.file.name} (${megabytes(r.file.length())}) · ${"%,d".format(java.util.Locale.US, vocab.size)} words"
+                    return ReaderSet(r, vocab, note, want, fallback, windowFrames, key)
                 } catch (e: Throwable) {
-                    why = "reader/ could not be used: ${e.message}"
+                    why = "files/reader/ could not be used: ${e.message}"
                     Log.w(TAG, "READER_FALLBACK $why", e)
                 }
             } else {
-                why = "reader/ is missing ${missing.joinToString(", ")}"
+                why = "files/reader/ is missing ${missing.joinToString(" and ")}"
             }
         }
         val vocab = context.assets.open("stub_vocab.txt").bufferedReader().readLines().map { it.trim() }.filter { it.isNotEmpty() }
         Log.i(TAG, "READER stub words=${vocab.size} ($why)")
-        return ReaderSet(Stub.reader(), Stub.table(vocab), "stub: words are placeholders ($why)")
+        val scanThreads = if (backend == Backend.CPU) 2 else SCAN_THREADS
+        return ReaderSet(Stub.reader(vocab, scan, scanThreads), vocab, "Stub reader: the words are placeholders ($why)", readerBackend(backend), null, windowFrames, key)
+    }
+
+    /** The same files, accelerator and window length: a reader (or a stub after a failed load) is not loaded again. */
+    private fun current(r: ReaderSet, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int): Boolean =
+        r.key == key && r.requested == readerBackend(backend) && r.windowFrames == windowFrames
+
+    /** True when [ensureReader] would return the loaded reader without work. */
+    fun isReaderLoaded(context: Context, backend: Backend, windowFrames: Int): Boolean =
+        readers?.let { current(it, readerKey(readerDir(context)), backend, windowFrames) } ?: false
+
+    fun closeReader() {
+        val r = readers ?: return
+        readers = null
+        LiteRt.call { r.reader.close() }
     }
 
     /** The file [backend] runs for windows of [windowFrames] frames: the NPU only the 10 s file, the others the asked length first. */
@@ -229,14 +287,10 @@ object Engine {
         LiteRt.call { l.encoder.close() }
     }
 
-    /**
-     * Runs the pipeline on the LiteRT thread. The word search gets 4 threads when the encoder is on the GPU or the NPU,
-     * and 2 when it shares the CPU with XNNPACK's 4.
-     */
+    /** Runs the pipeline on the LiteRT thread (the encoder and the reader's graph), the labels on the decode thread. */
     fun transcribe(pcm: PcmSource, loaded: Loaded, readers: ReaderSet, windowFrames: Int, overlapTokens: Int, listener: Pipeline.Listener, dump: Pipeline.Dump?): Pipeline.Result {
         cancel.set(false)
-        val scanThreads = if (loaded.encoder.backend == Backend.CPU) 2 else SCAN_THREADS
-        val pipeline = Pipeline(loaded.encoder, readers.reader, readers.table, prep, decode, scan, scanThreads)
+        val pipeline = Pipeline(loaded.encoder, readers.reader, readers.vocab, prep, decode)
         return LiteRt.call { pipeline.run(pcm, windowFrames, overlapTokens, listener, { cancel.get() }, dump) }
     }
 

@@ -16,7 +16,9 @@ reproduction for phones: Android on LiteRT and iOS on Core AI. It is not affilia
 
 ## Android
 
-`android/` is an app for Android 8.0+ (arm64) on LiteRT: record with the microphone or open an audio file, and the words appear with their times, without leaving the phone. The encoder runs on the CPU or the GPU on 30 s windows, or on a Qualcomm NPU on 10 s windows, with a 3.84 s overlap so that each window starts with the context it needs. The encoder is two files, one per window length (`eg2_audio_f16safe_fp16w_w30.tflite` and `_w10.tflite`, 589 MB each), not in this repository; `android/README.md` says how to put them on the phone and how the device check works. Until the trained reader is out, the app reads with a stub whose words are placeholders. On a Galaxy S26 it went through a 54-minute recording in 52.5 s on the NPU (62× real time) and in 66.9 s on the GPU at fp32 (49×, the phone at thermal status 3), not counting reading the file; on the CPU and the GPU its words matched the same pipeline run on a computer token for token, while the NPU's float16 arithmetic misses a per-token check at quiet moments (`android/README.md` has the table and the numbers).
+`android/` is an app for Android 8.0+ (arm64) on LiteRT: record with the microphone, open an audio file or try the bundled example, and the words appear with their times without leaving the phone; the encoder (30 s windows with a 3.84 s overlap) and reader v1 (one graph with its 200,000-word table) run on the GPU or the CPU, and the encoder also on a Qualcomm NPU.
+
+On a Pixel 8a it transcribed the 54-minute fixture in 276.8 s with both on the GPU at fp32, with a word error rate of 5.784 %, the same word or blank as the PyTorch reader on every token, and the 20 test-clean fixtures as listed in `reader/RELEASE.md`; `android/README.md` has the model files, the table and the numbers.
 
 Status: in progress (started 2026-10-13). Numbers appear here only after they are measured on a device.
 

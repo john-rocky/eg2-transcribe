@@ -9,3 +9,6 @@ local.properties
 *.tflite
 *.litertlm
 app/src/main/jniLibs/**/*.so
+
+# the example bundled in the APK (LibriSpeech test-clean 1284-1180-0000, CC BY 4.0; README "Credits and licenses")
+!app/src/main/assets/examples/*.flac
