@@ -1,0 +1,1 @@
+in the debate between the senior societies her defence of the fifteenth amendment had been not only a notable bit of reasoning but delivered with real enthusiasm

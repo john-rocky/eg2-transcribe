@@ -1,0 +1,1 @@
+the london plant was less temporary but not permanent supplying before it was torn out no fewer than three thousand lamps in hotels churches stores and dwellings in the vicinity of holborn viaduct

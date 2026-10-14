@@ -1,0 +1,79 @@
+{
+ "version": "v1",
+ "input": {
+  "shape": "[T, 512]",
+  "dtype": "float32",
+  "what": "EmbeddingGemma 2 audio soft tokens (embed_audio output), 25 per second"
+ },
+ "context": "bidirectional within the window",
+ "architecture": {
+  "name": "a",
+  "kind": "transformer encoder from scratch",
+  "layers": 4,
+  "d_model": 512,
+  "heads": 8,
+  "ffn": 2048,
+  "activation": "gelu",
+  "norm": "pre-LayerNorm",
+  "positions": "rotary (base 10000)",
+  "input": "LayerNorm -> Linear 512->512",
+  "output": "LayerNorm -> Linear 512->768",
+  "params": 13268994
+ },
+ "output": {
+  "vector": "[T, 768] L2-normalized",
+  "blank_logit": "[T]"
+ },
+ "logits": "scale * cos(vector, table[w]) for w in vocab; blank from blank_logit",
+ "scale": 91.21830749511719,
+ "vocab": "vocab.txt",
+ "table": {
+  "file": "word_table.npy",
+  "dtype": "float16",
+  "shape": "[200000, 768]",
+  "prompt": "task: search result | query: ",
+  "normalized": true
+ },
+ "decode": "greedy argmax over N+1, collapse repeats, drop blank",
+ "window": {
+  "seconds": 30,
+  "left_overlap_tokens": 96,
+  "right_extra_tokens": 1,
+  "note": "encoder is causal; the 83 tokens at the start of a window and its last token differ from a continuous run (fixtures/long-speckled-band: soft_tokens_w30 vs soft_tokens_continuous)"
+ },
+ "weights": {
+  "file": "reader.pt",
+  "format": "torch state_dict, float32",
+  "code": "train/model.py Reader(arch, n_vocab, k)",
+  "keys": "body.* (reader body), blank.weight [1, 768], blank.bias [1], log_scale (scale = exp(log_scale))"
+ },
+ "n_vocab": 200000,
+ "wer": {
+  "dev-clean": {
+   "wer": 0.06566,
+   "utterances": 2703,
+   "ref_words": 54402
+  },
+  "dev-other": {
+   "wer": 0.14927,
+   "utterances": 2864,
+   "ref_words": 50948
+  },
+  "test-clean": {
+   "wer": 0.06807,
+   "utterances": 2620,
+   "ref_words": 52576
+  },
+  "test-other": {
+   "wer": 0.15102,
+   "utterances": 2939,
+   "ref_words": 52343
+  },
+  "fixtures": {
+   "wer": 0.04806,
+   "utterances": 20,
+   "ref_words": 541
+  },
+  "decode": "greedy, no language model"
+ }
+}

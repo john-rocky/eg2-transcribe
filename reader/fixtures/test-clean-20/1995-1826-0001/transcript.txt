@@ -1,0 +1,1 @@
+the south she had not thought of seriously and yet knowing of its delightful hospitality and mild climate she was not averse to charleston or new orleans

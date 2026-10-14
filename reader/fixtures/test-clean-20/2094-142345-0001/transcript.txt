@@ -1,0 +1,1 @@
+but the windows are patched with wooden panes and the door i think is like the gate it is never opened

@@ -1,0 +1,612 @@
+{
+ "name": "eg2-transcribe reader fixtures",
+ "created": "2026-10-13T17:31:29+09:00",
+ "model": {
+  "repo": "google/embeddinggemma-2",
+  "revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+  "model_safetensors_sha256": "197a32965d4b1105faf060417baa899e193fb73cd401f42ec9295234d5553d79",
+  "dtype": "float32",
+  "device": "cpu",
+  "attn_implementation": {
+   "audio": "sdpa",
+   "text": "sdpa"
+  },
+  "note": "with transformers 5.19.0 do not use attn_implementation='eager' (inverted audio attention mask); the default (sdpa) path matches a brute-force sliding-window attention to 5e-5"
+ },
+ "software": {
+  "python": "3.12.13",
+  "transformers": "5.19.0",
+  "sentence_transformers": "6.1.0",
+  "torch": "2.11.0",
+  "numpy": "2.5.4",
+  "ffmpeg": "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+  "torch_threads": 12
+ },
+ "extractor": {
+  "feature_extractor_type": "Gemma4AudioFeatureExtractor",
+  "sampling_rate": 16000,
+  "feature_size": 128,
+  "frame_length": 320,
+  "hop_length": 160,
+  "fft_length": 512,
+  "min_frequency": 0.0,
+  "max_frequency": 8000.0,
+  "mel_floor": 0.001,
+  "preemphasis": 0.0,
+  "dither": 0.0,
+  "input_scale_factor": 1.0,
+  "per_bin_mean": null,
+  "per_bin_stddev": null,
+  "padding_side": "right",
+  "padding_value": 0.0
+ },
+ "token_contract": {
+  "tokens_per_second": 25,
+  "ms_per_token": 40,
+  "samples_per_token": 640,
+  "n_frames": "floor((n_samples - 161) / 160) + 1 (= input_features_mask sum)",
+  "n_tokens": "ceil(ceil(n_frames / 2) / 2) (= encoder attention_mask sum)",
+  "soft_token": "get_audio_features(input_features, input_features_mask).pooler_output valid rows (embed_audio output), float32 [n_tokens, 512]",
+  "audio_sequence": "<bos>=2 <|audio>=256000 n_tokens x <|audio|>=258881 <audio|>=258883 <eos>=1",
+  "embedding_768": "SentenceTransformer.encode({'array', 'sampling_rate': 16000}) float32, = mean over the n_tokens + 4 positions of the text model output, L2-normalized",
+  "waveform": "float32 in [-1, 1) as decoded by soundfile from audio.flac"
+ },
+ "files": {
+  "audio.flac": "16 kHz mono 16-bit FLAC (LibriSpeech: the original file bytes)",
+  "features.npy": "float32 [n_frames, 128] log-mel, the extractor rows with input_features_mask True",
+  "soft_tokens.npy": "float32 [n_tokens, 512]",
+  "embedding_768.npy": "float32 [768], L2-normalized",
+  "transcript.txt": "lower case, no punctuation (LibriSpeech text lower-cased)"
+ },
+ "selection": {
+  "split": "LibriSpeech test-clean, HF dataset openslr/librispeech_asr rev 71cacbfb7e2354c4226d01e70d77d5fca3d04ba1, clean/test/0000.parquet",
+  "parquet_sha256": "7113aa4c3cf963fb54697145719a7725f984c8836d1c494a554cbb9f1a017df0",
+  "utterances_in_split": 2620,
+  "rule": "id string ascending; 4 s <= duration <= 20 s; at most 2 per speaker; first 20"
+ },
+ "licenses": {
+  "librispeech": "LibriSpeech ASR corpus, V. Panayotov, G. Chen, D. Povey, S. Khudanpur, \"Librispeech: an ASR corpus based on public domain audio books\", ICASSP 2015; https://www.openslr.org/12; CC BY 4.0",
+  "librivox": "public domain; reader Kirsten Ferreri; https://archive.org/details/adventures_holmes",
+  "gutenberg": "Project Gutenberg eBook #1661, public domain in the USA; normalized chapter text only, without the Project Gutenberg header or license"
+ },
+ "entries": [
+  {
+   "id": "1089-134686-0000",
+   "path": "test-clean-20/1089-134686-0000",
+   "source": "LibriSpeech test-clean 1089-134686-0000",
+   "license": "CC BY 4.0",
+   "speaker_id": 1089,
+   "chapter_id": 134686,
+   "duration_s": 10.435,
+   "n_samples": 166960,
+   "n_frames": 1043,
+   "n_tokens": 261,
+   "sha256": {
+    "audio.flac": "30885601173f96b0d8ddd020dc959b055c6c1582b85a33e3fcab8c4b08ed94c2",
+    "features.npy": "ae0a80ba22f2656b63c203a6ede174bf59b05a4d74cbe14198493900868abd1d",
+    "soft_tokens.npy": "d7edd660c8d444861047b3fa6549610d2c7ab6eb0891eef15e6c9d1274b82ac8",
+    "embedding_768.npy": "47cb5f85df7f16f16e5e1f396abb970507cf8f10631a543f688a737cb31cfaab",
+    "transcript.txt": "a8fee6b38089655dce19b7dc55ef921babf359ce3050b90969adbe2552b61436"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "he hoped there would be stew for dinner turnips and carrots and bruised potatoes and fat mutton pieces to be ladled out in thick peppered flour fattened sauce"
+  },
+  {
+   "id": "1089-134686-0002",
+   "path": "test-clean-20/1089-134686-0002",
+   "source": "LibriSpeech test-clean 1089-134686-0002",
+   "license": "CC BY 4.0",
+   "speaker_id": 1089,
+   "chapter_id": 134686,
+   "duration_s": 6.625,
+   "n_samples": 106000,
+   "n_frames": 662,
+   "n_tokens": 166,
+   "sha256": {
+    "audio.flac": "66277a3fa3df407261dc2a3ce685a7ceef19999ab0c10531bee5257cb64cb59d",
+    "features.npy": "98b5214b51c03c17c6a0dd0ad2eba880cc3946caa016b1ead868e362881024f1",
+    "soft_tokens.npy": "cfba86935fab7b1be76d2687f2797855ce7b6c15b07c9dfefcf3555e2ed7b9ab",
+    "embedding_768.npy": "bcdc711074e99159edf5a0822306fef8bbf9d0ec9c1d229094a1ac5759c16cac",
+    "transcript.txt": "18870f8006ddad8c077a3fe7ea122cd099f7af9b3df96f95822e593b7ef650ec"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "after early nightfall the yellow lamps would light up here and there the squalid quarter of the brothels"
+  },
+  {
+   "id": "1188-133604-0000",
+   "path": "test-clean-20/1188-133604-0000",
+   "source": "LibriSpeech test-clean 1188-133604-0000",
+   "license": "CC BY 4.0",
+   "speaker_id": 1188,
+   "chapter_id": 133604,
+   "duration_s": 10.725,
+   "n_samples": 171600,
+   "n_frames": 1072,
+   "n_tokens": 268,
+   "sha256": {
+    "audio.flac": "4a10149395cb5af8aa5d04ef3adb49b3980baa93114d0851046e6343744b26cb",
+    "features.npy": "b92110a93c0ece44b7fb47236e7eb851e29123112a438105071cdfc55a9d9904",
+    "soft_tokens.npy": "32b8a3e5d5c061bab8003d55c5edb6906c14dc0c965fbca154cc16acb8c365f1",
+    "embedding_768.npy": "15cd14a4b91aeba350f8b6a0a2b30044865394a17e06d0d02ddf8fd1e6a9d68a",
+    "transcript.txt": "e40aed623ff4ea29573be6a891dc50f38930d713b2e6f0b1375f98257635e962"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "you will find me continually speaking of four men titian holbein turner and tintoret in almost the same terms"
+  },
+  {
+   "id": "1188-133604-0001",
+   "path": "test-clean-20/1188-133604-0001",
+   "source": "LibriSpeech test-clean 1188-133604-0001",
+   "license": "CC BY 4.0",
+   "speaker_id": 1188,
+   "chapter_id": 133604,
+   "duration_s": 9.04,
+   "n_samples": 144640,
+   "n_frames": 903,
+   "n_tokens": 226,
+   "sha256": {
+    "audio.flac": "3022b442af790536b60f18abe88b5376418a208f2774547b8d9700d4ef00bb03",
+    "features.npy": "ba0046462131e2901f5dbf388609f3336f08c90f3523ec473afdae59fb86b1a5",
+    "soft_tokens.npy": "1023aa3d1c9187ebc5868853a962485b90ffc369459c7ac59139a1111ebab0d7",
+    "embedding_768.npy": "030be68b4de37d3e3513adf57ee94a8522873df7e9488a1c27103e3c59d87209",
+    "transcript.txt": "eb94ec5ec29a0b8193ad22b253498e16fd1e79c4a6899ebd9f885d516c0a54d8"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0000001192092896,
+   "transcript": "they unite every quality and sometimes you will find me referring to them as colorists sometimes as chiaroscurists"
+  },
+  {
+   "id": "121-121726-0000",
+   "path": "test-clean-20/121-121726-0000",
+   "source": "LibriSpeech test-clean 121-121726-0000",
+   "license": "CC BY 4.0",
+   "speaker_id": 121,
+   "chapter_id": 121726,
+   "duration_s": 8.46,
+   "n_samples": 135360,
+   "n_frames": 845,
+   "n_tokens": 212,
+   "sha256": {
+    "audio.flac": "81378fdb3e648b43efb1cb8c4f87da3fc9cfbe19c5dda97e9e7361c4a2470d2f",
+    "features.npy": "aa9e4347b9ab3f7d4650a19158c0e06b6244c2f2a188a409fe6cbd9aee8f8591",
+    "soft_tokens.npy": "7fd8611d33bdad09e2eb7c019b660e9f68ec59812961bc2717a8909784369c82",
+    "embedding_768.npy": "04aa915ff71b7af8c1174d6a7fc6166cc26dda3ee0926b34f00760e5c346fb75",
+    "transcript.txt": "8e7934b34fe2ab71576aecece3226ab332c29cf835d2d5ab22b9f07c1b799129"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "also a popular contrivance whereby love making may be suspended but not stopped during the picnic season"
+  },
+  {
+   "id": "121-121726-0001",
+   "path": "test-clean-20/121-121726-0001",
+   "source": "LibriSpeech test-clean 121-121726-0001",
+   "license": "CC BY 4.0",
+   "speaker_id": 121,
+   "chapter_id": 121726,
+   "duration_s": 5.925,
+   "n_samples": 94800,
+   "n_frames": 592,
+   "n_tokens": 148,
+   "sha256": {
+    "audio.flac": "4d4459266056fcd052ced71563e093ecf74a420abfa3a402283fb6b8eb848441",
+    "features.npy": "e538a9f9c2730460e5cba65587befb134a4606b4f3eb5abd2513350a35619f2e",
+    "soft_tokens.npy": "45e41450e1888c79ab1277f2183f5e0c227a8bf4fe8d23dffda0637665f0817a",
+    "embedding_768.npy": "a79490dd58ff80fe59a06af3ca74cc793e99d4a1d3dbb1f53b056c163b434a6e",
+    "transcript.txt": "d0e58eaf4aea5e82dd6e72f0fe54810016b0a527fbdb3328f2d2c984e96fd585"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0000001192092896,
+   "transcript": "harangue the tiresome product of a tireless tongue"
+  },
+  {
+   "id": "1221-135766-0000",
+   "path": "test-clean-20/1221-135766-0000",
+   "source": "LibriSpeech test-clean 1221-135766-0000",
+   "license": "CC BY 4.0",
+   "speaker_id": 1221,
+   "chapter_id": 135766,
+   "duration_s": 12.435,
+   "n_samples": 198960,
+   "n_frames": 1243,
+   "n_tokens": 311,
+   "sha256": {
+    "audio.flac": "1f6b9ba126dc0f0a3cb813b04e2c970ff9583beeaf8cfaa8f7c8199244aa2514",
+    "features.npy": "9f78aa441403c3e0b5bba2157b7cd18ba75c76dc83e3533447547e4e888bb786",
+    "soft_tokens.npy": "0276c3f505eaa2263e979bea3ec63dd6527af0f63a199e1afa44c68179b42cba",
+    "embedding_768.npy": "2da782b40b87b2957b8a67439d53361995a5cdd01a09175c30feb670fa15f60a",
+    "transcript.txt": "d476586e44e123514669c6c1b168394d40d120ddc4aa9dcfcd5327dcab910b44"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "how strange it seemed to the sad woman as she watched the growth and the beauty that became every day more brilliant and the intelligence that threw its quivering sunshine over the tiny features of this child"
+  },
+  {
+   "id": "1221-135766-0001",
+   "path": "test-clean-20/1221-135766-0001",
+   "source": "LibriSpeech test-clean 1221-135766-0001",
+   "license": "CC BY 4.0",
+   "speaker_id": 1221,
+   "chapter_id": 135766,
+   "duration_s": 16.715,
+   "n_samples": 267440,
+   "n_frames": 1671,
+   "n_tokens": 418,
+   "sha256": {
+    "audio.flac": "178cd97b0bbaa2f8919fd2a8a7c17e9d3891ec88199e54dbb0f01bd6274207a0",
+    "features.npy": "8e49a237a3e1259ac2677ef4c94d161c7072ecb17c7ca1c15a49560e3f56b54f",
+    "soft_tokens.npy": "6ea51334d153100e1cf8af4393c1aca052f963e5a825c6e5bdbc060fff26c43d",
+    "embedding_768.npy": "6e53f6849148ccc662a3e09464609cb966c8a9c6362d2b94b54c812b4b87f741",
+    "transcript.txt": "2cd602a51b1467c3ef139298a3f59a5ee598ac14af23fd420703555216d88516"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "god as a direct consequence of the sin which man thus punished had given her a lovely child whose place was on that same dishonoured bosom to connect her parent for ever with the race and descent of mortals and to be finally a blessed soul in heaven"
+  },
+  {
+   "id": "1284-1180-0000",
+   "path": "test-clean-20/1284-1180-0000",
+   "source": "LibriSpeech test-clean 1284-1180-0000",
+   "license": "CC BY 4.0",
+   "speaker_id": 1284,
+   "chapter_id": 1180,
+   "duration_s": 8.12,
+   "n_samples": 129920,
+   "n_frames": 811,
+   "n_tokens": 203,
+   "sha256": {
+    "audio.flac": "1b76cef86ab0f918aac7f576be7398f29bfa968e6c78bdf024c335faedd378f1",
+    "features.npy": "19b8d67a9a50bcbc832d337b56b69302a925f48d480c0fb8f733242eafe42196",
+    "soft_tokens.npy": "b37446a0cf6bd767a5fa59c09f1e2af391c2c690761d1fccc40e3c52a3aa7987",
+    "embedding_768.npy": "434669ca109e2c66caaee6ec18cdd711f33bf294cd3832fa1911875f3b7b538f",
+    "transcript.txt": "221b2f843189ecb2110496cf22ac2604afff7bd34bcdf038df41bf843ed1302c"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "he wore blue silk stockings blue knee pants with gold buckles a blue ruffled waist and a jacket of bright blue braided with gold"
+  },
+  {
+   "id": "1284-1180-0001",
+   "path": "test-clean-20/1284-1180-0001",
+   "source": "LibriSpeech test-clean 1284-1180-0001",
+   "license": "CC BY 4.0",
+   "speaker_id": 1284,
+   "chapter_id": 1180,
+   "duration_s": 7.755,
+   "n_samples": 124080,
+   "n_frames": 775,
+   "n_tokens": 194,
+   "sha256": {
+    "audio.flac": "b44a1ad458675ba4d8d4dd6d4529d40fbc6fc63d27afce7877dc2024592b5414",
+    "features.npy": "56f38a64fb0b099721260187bea4ffc9b0a2adc3d122aa09fb5d151d4fd0599b",
+    "soft_tokens.npy": "a46afa7a194d03d0e2c3daeb48301bef1ef7a97b8ebf8515995219363d501b6b",
+    "embedding_768.npy": "7fd24e52809b4f12ca1c1b7f1859262a35aab16a99d7d52e1d76fbf959788a92",
+    "transcript.txt": "eb1cf743e2cfb36c61381fc276163671f3a24496b05de9dfcaec1e1fd73e0c1d"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0000001192092896,
+   "transcript": "his hat had a peaked crown and a flat brim and around the brim was a row of tiny golden bells that tinkled when he moved"
+  },
+  {
+   "id": "1320-122612-0000",
+   "path": "test-clean-20/1320-122612-0000",
+   "source": "LibriSpeech test-clean 1320-122612-0000",
+   "license": "CC BY 4.0",
+   "speaker_id": 1320,
+   "chapter_id": 122612,
+   "duration_s": 13.48,
+   "n_samples": 215680,
+   "n_frames": 1347,
+   "n_tokens": 337,
+   "sha256": {
+    "audio.flac": "2f914687b13e1864d267282c3749ab6f0b6a5b7dcb2b772f28b6a3af7854859e",
+    "features.npy": "918a914c92e852a3e0c960e4bbd5b08e7a15b58bb871480f078662e0657bdf2f",
+    "soft_tokens.npy": "dcab33dbfcee399c9a55ab45ed40da779c8c6c1426d91f75697f2453a9b82eef",
+    "embedding_768.npy": "f3f14b602688ea9b65f5d6e6a8ac3a118d064defb1e506508074baf0bacf73e4",
+    "transcript.txt": "6ab943898fc9a6c988f25f62bb2fdf712cdc97bd52f1b877a440ae5dcc6b159e"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "since the period of our tale the active spirit of the country has surrounded it with a belt of rich and thriving settlements though none but the hunter or the savage is ever known even now to penetrate its wild recesses"
+  },
+  {
+   "id": "1320-122612-0001",
+   "path": "test-clean-20/1320-122612-0001",
+   "source": "LibriSpeech test-clean 1320-122612-0001",
+   "license": "CC BY 4.0",
+   "speaker_id": 1320,
+   "chapter_id": 122612,
+   "duration_s": 9.52,
+   "n_samples": 152320,
+   "n_frames": 951,
+   "n_tokens": 238,
+   "sha256": {
+    "audio.flac": "0a79505430aa3995a69d287ed16f8368a889b652ff6f3f4f25c371e07f7f0a20",
+    "features.npy": "ef699c97583b50c9e49a3ed291f570ac53a4eb8f443a5aa54a78880c9b7d18a9",
+    "soft_tokens.npy": "8c8e648cbb754efad639193eeb6be07c4d8d98bd8c6aef07b5b6678d6f22891a",
+    "embedding_768.npy": "2e0bc70a8234ecd0bdefa9574cdecee982519b0a7d8551cbc19bb60f2383d00c",
+    "transcript.txt": "ce0804fcdbf71854d1341e2eae2d0e952dcc19cbcb50e3d835ef60d2e98949db"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0000001192092896,
+   "transcript": "the dews were suffered to exhale and the sun had dispersed the mists and was shedding a strong and clear light in the forest when the travelers resumed their journey"
+  },
+  {
+   "id": "1580-141083-0000",
+   "path": "test-clean-20/1580-141083-0000",
+   "source": "LibriSpeech test-clean 1580-141083-0000",
+   "license": "CC BY 4.0",
+   "speaker_id": 1580,
+   "chapter_id": 141083,
+   "duration_s": 8.94,
+   "n_samples": 143040,
+   "n_frames": 893,
+   "n_tokens": 224,
+   "sha256": {
+    "audio.flac": "59123e88017e4bf645e39506a878b5734b3d94fe990018de25b712ba881cf7a5",
+    "features.npy": "61d22eb25063fb7deb2e3650d2b85cd5d939aa5163e6deab1d09f2f7016260d7",
+    "soft_tokens.npy": "99178bbfff1c2abddcb28a6e00c9acef7f0c9f59562e8412e60605542c5c57f6",
+    "embedding_768.npy": "323b603da852aaea1465484358de884f0f81df0c04a070b80a0144a2e8874fb6",
+    "transcript.txt": "ebc54d3c03abd923b49beed7af757706aed5c8c8cd180f4a20ff1f1dffee9ec8"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "i will endeavour in my statement to avoid such terms as would serve to limit the events to any particular place or give a clue as to the people concerned"
+  },
+  {
+   "id": "1580-141083-0001",
+   "path": "test-clean-20/1580-141083-0001",
+   "source": "LibriSpeech test-clean 1580-141083-0001",
+   "license": "CC BY 4.0",
+   "speaker_id": 1580,
+   "chapter_id": 141083,
+   "duration_s": 10.255,
+   "n_samples": 164080,
+   "n_frames": 1025,
+   "n_tokens": 257,
+   "sha256": {
+    "audio.flac": "9914a442f04e4fed4a8144ec63326ec3b5f031ccd73203b1a9c309182a172ba7",
+    "features.npy": "3bfc3f2b2e75fbb9ab5ae3435f0fe4257b691c0d4b54500a43a822c435ec9b08",
+    "soft_tokens.npy": "56e9d6c3eec87dde17da07b263dbd9569aec4a6107f0bed291434353216e3964",
+    "embedding_768.npy": "9f1e604374bab9e840a9f3ddf8cd55bbdeffa70acb97963d49c461f4725efbff",
+    "transcript.txt": "c8b846b3e41102a73a0c31bcc27e7795441a8dd0c785bf5023d516e82ab91c15"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "i had always known him to be restless in his manner but on this particular occasion he was in such a state of uncontrollable agitation that it was clear something very unusual had occurred"
+  },
+  {
+   "id": "1995-1826-0000",
+   "path": "test-clean-20/1995-1826-0000",
+   "source": "LibriSpeech test-clean 1995-1826-0000",
+   "license": "CC BY 4.0",
+   "speaker_id": 1995,
+   "chapter_id": 1826,
+   "duration_s": 9.485,
+   "n_samples": 151760,
+   "n_frames": 948,
+   "n_tokens": 237,
+   "sha256": {
+    "audio.flac": "74596627a026feb72e3acba17ee9268f120ee25e9f4afb935bb2f3d3ba779e57",
+    "features.npy": "2a299326613019e36b7c7b77c9e09357d86bef507fce3dd18941516ffd262674",
+    "soft_tokens.npy": "83c67c4f644ccfd2ad71ed67bfb9b498c9d721963272bfff93795e9e3408dfdd",
+    "embedding_768.npy": "24074c6613c8ef89a2f85a98b18500d5b1ac0166213044083ac95a7bc25db745",
+    "transcript.txt": "014fc06c16320dfb0ef789dfddb46651d34340447a7734c8def8932aa7383d70"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "in the debate between the senior societies her defence of the fifteenth amendment had been not only a notable bit of reasoning but delivered with real enthusiasm"
+  },
+  {
+   "id": "1995-1826-0001",
+   "path": "test-clean-20/1995-1826-0001",
+   "source": "LibriSpeech test-clean 1995-1826-0001",
+   "license": "CC BY 4.0",
+   "speaker_id": 1995,
+   "chapter_id": 1826,
+   "duration_s": 10.17,
+   "n_samples": 162720,
+   "n_frames": 1016,
+   "n_tokens": 254,
+   "sha256": {
+    "audio.flac": "56d8ebeb4138c7cc33c7f468aec078a3d76694b8759b1e860d876288f475e8ee",
+    "features.npy": "a51daf8b4caa1e486b265303a6e76136eb619f8e61947d73f1e2acc5339a2515",
+    "soft_tokens.npy": "4a7044e31efb58ee0761f2ebef68dfaface884e18c9429565b7d75d99efa5df7",
+    "embedding_768.npy": "280807e1fd02f293b481af1394b532325a89adb21a0d6444c2836b1e754135a7",
+    "transcript.txt": "6a837c85dea09250c4dccfb0acb58c647b33f06e090d4d2daaa3bc733c8e1f46"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0000001192092896,
+   "transcript": "the south she had not thought of seriously and yet knowing of its delightful hospitality and mild climate she was not averse to charleston or new orleans"
+  },
+  {
+   "id": "2094-142345-0001",
+   "path": "test-clean-20/2094-142345-0001",
+   "source": "LibriSpeech test-clean 2094-142345-0001",
+   "license": "CC BY 4.0",
+   "speaker_id": 2094,
+   "chapter_id": 142345,
+   "duration_s": 8.03,
+   "n_samples": 128480,
+   "n_frames": 802,
+   "n_tokens": 201,
+   "sha256": {
+    "audio.flac": "b4fb8a76b5026b1cff5193cba298dc66156f93e228a221a06d26790c34cc049f",
+    "features.npy": "2b0aafdc0b845f0e4b60038b09e40f1845495c7dab6f8c5b2e149ed4d149753b",
+    "soft_tokens.npy": "a8225d83f96d29af27bdbd19156f49c1e51bb8794ec18b65c0e6d51cd9a221af",
+    "embedding_768.npy": "89b2184bb1e6ce1c41d807f304bedd838787a438e375fbf4d8eeae85cbf55f2a",
+    "transcript.txt": "b838ef539d9d5b151219a06b5bca8a27dec6b32da84bfc7e55c9fc252df7218b"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "but the windows are patched with wooden panes and the door i think is like the gate it is never opened"
+  },
+  {
+   "id": "2094-142345-0002",
+   "path": "test-clean-20/2094-142345-0002",
+   "source": "LibriSpeech test-clean 2094-142345-0002",
+   "license": "CC BY 4.0",
+   "speaker_id": 2094,
+   "chapter_id": 142345,
+   "duration_s": 15.52,
+   "n_samples": 248320,
+   "n_frames": 1551,
+   "n_tokens": 388,
+   "sha256": {
+    "audio.flac": "a7ff94ece16d3749083929af8e815efbb341c8f1b99927a13e1a559c50ab5660",
+    "features.npy": "ace17edacb3425799049aa7c7d9a93f2ee09450486a65c802bffac93064b0748",
+    "soft_tokens.npy": "ebaa154e638ce01a8ca8e949694fe8a9dd3b1b71dc11d29d4963a17cb42c59a4",
+    "embedding_768.npy": "12fe2b4b35e6e526a041361bbf591fe146289a96c51a55663fef3adfedeb8c61",
+    "transcript.txt": "be73bdfa4a3005de3674e8529d7ca229a5ad79fa7ed86f6f98ba070b56d11a1d"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "for it is a solid heavy handsome door and must once have been in the habit of shutting with a sonorous bang behind a liveried lackey who had just seen his master and mistress off the grounds in a carriage and pair"
+  },
+  {
+   "id": "2300-131720-0000",
+   "path": "test-clean-20/2300-131720-0000",
+   "source": "LibriSpeech test-clean 2300-131720-0000",
+   "license": "CC BY 4.0",
+   "speaker_id": 2300,
+   "chapter_id": 131720,
+   "duration_s": 5.08,
+   "n_samples": 81280,
+   "n_frames": 507,
+   "n_tokens": 127,
+   "sha256": {
+    "audio.flac": "84cb3f03857e7a68d5811c2f07f14725f8583a61d3a280816e30ec44956d8d7e",
+    "features.npy": "386ddae2bdd12730a7d461c53647818a1253d0feafe480c3b94f1b8d182213a3",
+    "soft_tokens.npy": "334b1df6efad665b4137911d5710ef4e4a9bda0e9a43620132110439697e8c09",
+    "embedding_768.npy": "a8dbb7d556220d04a1d9f89613ed90e2b8c4c3f1351c6846ae36c988fbf8c7e4",
+    "transcript.txt": "455da3595fc08a225bbaca592fbc237d7bac4fa616b000ef4fa6521f5e7f48dc"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "the paris plant like that at the crystal palace was a temporary exhibit"
+  },
+  {
+   "id": "2300-131720-0001",
+   "path": "test-clean-20/2300-131720-0001",
+   "source": "LibriSpeech test-clean 2300-131720-0001",
+   "license": "CC BY 4.0",
+   "speaker_id": 2300,
+   "chapter_id": 131720,
+   "duration_s": 14.63,
+   "n_samples": 234080,
+   "n_frames": 1462,
+   "n_tokens": 366,
+   "sha256": {
+    "audio.flac": "421a5788b45cc79e2c7eb4cc91ad5ca98a0644a0dab2978436a20fc4cd1853ce",
+    "features.npy": "d666c56bcdc9b9ae5b516ed12fdaac9563c312cfecbf57c01ea6daf626135952",
+    "soft_tokens.npy": "251f2eb52d16ccbeb40c3bac2dfdcee724b142f1aa90474dcd5d55dd86af7376",
+    "embedding_768.npy": "d3970240fd0d5cf11c891567f9953a263fe3ae663ce630c7a8e0cd41cb09bbe1",
+    "transcript.txt": "76c67b267e8e9ba01f90287e040c7608239ed0a7c5792a8f3b0e3182dd3c70bb"
+   },
+   "cos_sequence_path_vs_st_encode": 1.0,
+   "transcript": "the london plant was less temporary but not permanent supplying before it was torn out no fewer than three thousand lamps in hotels churches stores and dwellings in the vicinity of holborn viaduct"
+  }
+ ],
+ "long": {
+  "id": "long-speckled-band",
+  "path": "long-speckled-band",
+  "source": {
+   "work": "The Adventure of the Speckled Band (Arthur Conan Doyle), chapter 8 of the LibriVox recording 'The Adventures of Sherlock Holmes'",
+   "reader": "Kirsten Ferreri",
+   "archive_org_identifier": "adventures_holmes",
+   "url": "https://archive.org/download/adventures_holmes/adventureholmes_08_doyle.mp3",
+   "catalog": "https://librivox.org/the-adventures-of-sherlock-holmes/",
+   "mp3_sha256": "4817a804f9c7178eebc412f7a9be54edb8923a2e516aa86249071287f411c704"
+  },
+  "license": "public domain (LibriVox recording); transcript from Project Gutenberg eBook #1661 (public domain in the USA)",
+  "conversion": {
+   "ffmpeg": "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+   "command": "ffmpeg -nostdin -hide_banner -loglevel error -y -i <mp3> -map_metadata -1 -fflags +bitexact -flags:a +bitexact -ac 1 -ar 16000 -sample_fmt s16 -c:a flac audio.flac"
+  },
+  "duration_s": 3257.44325,
+  "n_samples": 52119092,
+  "n_frames": 325744,
+  "n_tokens": 81436,
+  "sha256": {
+   "audio.flac": "31f329c8f50cd80c8f3c1ed271b0faf8d1883e5c47c9a8da287f1fb4655274da",
+   "features.npy": "509d9de0566c98c7230987d73fd28d4a25582fc236e88800f70ec6d732c25d7c",
+   "soft_tokens_continuous.npy": "1673734891f2edcc747d495978f82ffbb18097ca4d1af18832dab56ca635aa8d",
+   "soft_tokens_w30.npy": "d6a452348b763997048505a5b03bf0191260af8370ae3dcd4ec1c40457df4e78",
+   "transcript.txt": "24492a1809f0833c86cbc70bc81dd9add0033de43658fabf5a4e16f19607293c"
+  },
+  "trim": null,
+  "trim_note": "Full length kept. The LibriVox intro at the start and the outro at the end are not in the Gutenberg text; locate the first and last sentences of the body to trim.",
+  "transcript": {
+   "file": "transcript.txt",
+   "from": "Project Gutenberg #1661, section 'VIII. THE ADVENTURE OF THE SPECKLED BAND' (body after the heading, up to 'IX.')",
+   "start_line": 6783,
+   "end_line": 7921,
+   "non_ascii_chars": [
+    "£",
+    "—",
+    "‘",
+    "’",
+    "“",
+    "”"
+   ],
+   "normalization": "lower case, punctuation removed, digits kept, word-internal apostrophes kept, curly apostrophes mapped to '",
+   "n_words": 9889,
+   "note": "WER on this clip is indicative only (reading may differ from the printed text)"
+  },
+  "window_policy": {
+   "soft_tokens_continuous.npy": {
+    "what": "continuous encoding of the whole clip",
+    "how": "one get_audio_features call cannot fit in memory here (dense [T, T] attention mask, T = 81436); chunks of 15000 kept tokens, each run with 200 tokens of features on both sides, stitched",
+    "chunks_[keep_from, keep_to, run_from, run_to]": [
+     [
+      0,
+      15000,
+      0,
+      15200
+     ],
+     [
+      15000,
+      30000,
+      14800,
+      30200
+     ],
+     [
+      30000,
+      45000,
+      29800,
+      45200
+     ],
+     [
+      45000,
+      60000,
+      44800,
+      60200
+     ],
+     [
+      60000,
+      75000,
+      59800,
+      75200
+     ],
+     [
+      75000,
+      81436,
+      74800,
+      81436
+     ]
+    ],
+    "exactness": "causal encoder, receptive field 180 tokens + 3 frames lookahead",
+    "one_call_check_across_boundary": {
+     "tokens_compared": [
+      12200,
+      17999
+     ],
+     "boundary_at": 15000,
+     "max_abs_diff": 6.321072578430176e-05,
+     "cos_min": 0.9999998211860657,
+     "cos_mean": 1.0
+    }
+   },
+   "soft_tokens_w30.npy": {
+    "what": "independent 30 s windows, no overlap, tokens concatenated",
+    "how": "window k = samples [480000 k, 480000 (k + 1)); each window through the extractor (default max_length 480000) and get_audio_features on its own",
+    "windows": 109,
+    "tokens_per_full_window": 750,
+    "index": "global token g = 750 k + p, p = 0..749 within window k"
+   },
+   "continuous_vs_w30_token_cos": {
+    "mean": 0.9877846837043762,
+    "min": -0.2567799985408783
+   }
+  },
+  "timing_s": {
+   "continuous": 30.6,
+   "w30": 108.9
+  }
+ },
+ "wall_s": 186.3
+}
