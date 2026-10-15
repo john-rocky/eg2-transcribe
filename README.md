@@ -40,7 +40,7 @@ The Core AI build
 ([mlboydaisuke/EmbeddingGemma-2-Transcribe-CoreAI](https://huggingface.co/mlboydaisuke/EmbeddingGemma-2-Transcribe-CoreAI),
 iOS / macOS) uses reader v2; the Android build
 ([mlboydaisuke/EmbeddingGemma-2-Transcribe-LiteRT](https://huggingface.co/mlboydaisuke/EmbeddingGemma-2-Transcribe-LiteRT))
-carries reader v1.
+ships its own copy of the reader, and that repository's card says which version it carries.
 
 License: Apache-2.0. The reader is trained on LibriSpeech (CC BY 4.0); the word table holds EmbeddingGemma 2 outputs,
 so deployments follow the Gemma Prohibited Use Policy.
