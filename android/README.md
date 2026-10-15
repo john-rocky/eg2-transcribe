@@ -124,6 +124,19 @@ The device check with this version (debug build, LiteRT 2.2.0, windows on auto) 
 
 Per window on the GPU the reader took 218.3 ms on the 10 s files and 710.3 ms on the 30 s files (medians over the fixtures; reader v1 205.4 and 627.8 ms on 2026-10-14) and the encoder 419.9 and 1,122.6 ms; over the 54 minutes the reader took 989 ms per window against reader v1's 839 ms (2026-10-14, an earlier build; thermal status 2 at the end of both runs). On the CPU the encoder itself ran 1.5–1.7 times slower than on 2026-10-14 (2.30 s and 6.85 s per 10 s and 30 s window), and the reader took 1.37 s and 4.19 s. The 54-minute run reached thermal status 2 in its second minute; reading the FLAC took 5.4 s on top; the app peaked at 5,267,760 kB (VmHWM) and the phone's MemAvailable fell to 873,848 kB while the app loaded its models. In the earlier session the 54-minute run came right after the CPU run: MemAvailable fell under the device check's own line of 800,000 kB while the app loaded the 10 s files at its start (auto loads them before it reads the file), and the check stopped the app; the later session ran it alone, on a rested phone.
 
+## What it did on a Galaxy S26 with reader v2 (2026-10-15)
+
+The device check with this version (debug build, LiteRT 2.2.0, windows on auto) on a Galaxy S26 (SM-S942Q, SM8850), the same five model files (each file's SHA-256 on the phone equal to the table above), in one session of 18.1 minutes. The 54-minute run came before the other runs, on a rested phone (thermal status 0 and the battery at 35.9 °C after 555 s of rest). WER as above.
+
+| encoder and reader on | input | time | words |
+|---|---|---|---|
+| GPU fp32 | 54 min 17 s: auto picks 30 s windows (125) | 140.8 s (23.1× real time): encoder 318 ms, reader 787 ms per window | WER 3.812 % (377 errors): the PyTorch path's word or blank on all 81,436 tokens |
+| GPU fp32 | the 20 test-clean fixtures: 11 on the 10 s files, then 9 on the 30 s files | 27.9 s for the 20 | 20 of 20 transcripts equal to `reader/RELEASE.md`, the PyTorch path's word or blank on all 5,036 tokens |
+| CPU, 4 threads | the 20 fixtures | 32.3 s for the 20 | 20 of 20, all 5,036 tokens |
+| GPU fp32 | the bundled example, 8.1 s, through the Try button: auto picks one 10 s window | 0.26 s (31.4× real time): encoder 104.1 ms, reader 100.1 ms | the reader's output listed in `reader/RELEASE.md` |
+
+Per window on the GPU the reader took 111.3 ms on the 10 s files and 871.8 ms on the 30 s files (medians over the fixtures) and the encoder 122.7 and 399.8 ms; on the CPU the reader took 251.4 and 829.0 ms and the encoder 346.6 and 1,104.9 ms. On this phone the reader's 30 s window costs 7.8 times its 10 s window on the GPU (3.25 times on the Pixel 8a) and no less than on the CPU, so over the 54 minutes the reader took 71 % of each window's time. The 54-minute run reached thermal status 1 after 25 s and 2 after 45 s, and the GPU's clock limit fell from 1,300 to 826 MHz by its end: per window the encoder went from 282–343 ms to 350–379 ms and the reader from 695–729 ms to 860–911 ms. Reading the FLAC took 2.8 s on top (the app's FLAC reader, all 52,119,092 samples); the app peaked at 4,472,048 kB (VmHWM) and the phone's MemAvailable stayed at 4,768,140 kB or more. 3 s of near silence ended with "No speech detected" (−60 dBFS, under the app's −46 dBFS floor).
+
 ## What it did with auto windows, reader v1 (2026-10-14)
 
 The device check with this version (debug build, LiteRT 2.2.0, windows on auto) on a Pixel 8a, all five model files, in one session of 18.6 minutes:
