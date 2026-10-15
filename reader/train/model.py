@@ -7,7 +7,7 @@ scale = exp(log_scale), a learned scalar that starts at 20.
 
 Reader bodies (all output v [B, T, 768]):
   a  LayerNorm -> Linear 512->512 -> 4 pre-LN bidirectional transformer layers (d 512, 8 heads, FFN 2048, GELU,
-     rotary positions, base 10000) -> LayerNorm -> Linear 512->768
+     rotary positions, base 10000) -> LayerNorm -> Linear 512->768; `layers` sets the number of layers (v1: 4)
   b  EmbeddingGemma 2 text model cut to k layers: projection-only per-layer embeddings (PLE), layers
      0..k-1, final RMSNorm and embedding_projection 512->768, initialized from the checkpoint; the soft tokens go
      in as inputs_embeds at positions 0..T-1, attention is bidirectional over the whole utterance (no sliding
@@ -221,10 +221,10 @@ class ReaderC(nn.Module):
 # ---------------------------------------------------------------- reader = body + blank head + scale
 
 class Reader(nn.Module):
-    def __init__(self, arch, n_vocab, k=4):
+    def __init__(self, arch, n_vocab, k=4, layers=4):
         super().__init__()
         self.arch = arch
-        self.body = {"a": lambda: ReaderA(), "b": lambda: ReaderB(k=k), "c": lambda: ReaderC()}[arch]()
+        self.body = {"a": lambda: ReaderA(layers=layers), "b": lambda: ReaderB(k=k), "c": lambda: ReaderC()}[arch]()
         self.blank = nn.Linear(D_OUT, 1)
         nn.init.constant_(self.blank.bias, math.log(n_vocab))
         self.log_scale = nn.Parameter(torch.tensor(math.log(20.0)))
@@ -239,9 +239,9 @@ class Reader(nn.Module):
         return F.normalize(v, dim=-1), self.blank(v).squeeze(-1)
 
 
-def describe(arch, k=4):
+def describe(arch, k=4, layers=4):
     if arch == "a":
-        return {"name": "a", "kind": "transformer encoder from scratch", "layers": 4, "d_model": 512, "heads": 8,
+        return {"name": "a", "kind": "transformer encoder from scratch", "layers": layers, "d_model": 512, "heads": 8,
                 "ffn": 2048, "activation": "gelu", "norm": "pre-LayerNorm", "positions": "rotary (base 10000)",
                 "input": "LayerNorm -> Linear 512->512", "output": "LayerNorm -> Linear 512->768"}
     if arch == "b":
@@ -382,6 +382,23 @@ def limit_mps_memory(max_gb):
     return frac, rec / 1e9
 
 
+def default_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    return "mps" if torch.backends.mps.is_available() else "cpu"
+
+
+def cuda_matmul(mode="ieee"):
+    """On CUDA: float32 matmuls and convolutions in full precision ("ieee"; torch's default for matmuls, while
+    cuDNN convolutions default to TF32) or on TF32 tensor cores ("tf32"). -> the settings in effect."""
+    tf32 = mode == "tf32"
+    torch.backends.cuda.matmul.allow_tf32 = tf32
+    torch.backends.cudnn.allow_tf32 = tf32
+    return {"mode": mode, "cuda.matmul.allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+            "cudnn.allow_tf32": torch.backends.cudnn.allow_tf32,
+            "float32_matmul_precision": torch.get_float32_matmul_precision()}
+
+
 def collapse(labels, blank_id):
     """Greedy CTC read-out: merge repeats, drop blanks. labels: 1-D sequence of ints."""
     out, prev = [], None
@@ -468,6 +485,7 @@ def main():
     ap.add_argument("--self-test", action="store_true", help="gathered CTC == full CTC (loss and gradients)")
     ap.add_argument("--check-eg2", default=None, metavar="MODEL_DIR", help="ReaderB vs transformers")
     ap.add_argument("--k", type=int, default=4)
+    ap.add_argument("--layers", type=int, default=4, help="arch a: number of transformer layers")
     args = ap.parse_args()
     if args.self_test:
         if not self_test():
@@ -475,8 +493,8 @@ def main():
     if args.check_eg2:
         check_eg2(args.check_eg2, k=args.k)
     for arch in ("a", "b", "c"):
-        n = sum(p.numel() for p in Reader(arch, 200000, k=args.k).parameters())
-        print(f"arch {arch}: {n:,} parameters")
+        n = sum(p.numel() for p in Reader(arch, 200000, k=args.k, layers=args.layers).parameters())
+        print(f"arch {arch}{f' ({args.layers} layers)' if arch == 'a' else ''}: {n:,} parameters")
 
 
 if __name__ == "__main__":

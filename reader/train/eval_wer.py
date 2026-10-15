@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import data as D  # noqa: E402
 from decode import load_reader_dir, transcribe_batch, transcribe_split  # noqa: E402
-from model import limit_mps_memory  # noqa: E402
+from model import cuda_matmul, default_device, limit_mps_memory  # noqa: E402
 
 
 def log(msg):
@@ -86,9 +86,16 @@ def pronunciations(lexicon):
     return pron
 
 
-def write_config(reader_dir, model_scale, n_vocab, table_shape, arch, params):
+def write_config(reader_dir, model_scale, n_vocab, table_shape, arch, params, version="v1", train_env=None):
+    """train_env: the "env" block of the run's metrics.json; a run trained with TF32 matmuls says so in
+    weights.format (the WER below is decoded in full float32)."""
+    fmt = "torch state_dict, float32"
+    mm = ((train_env or {}).get("matmul") or {}).get("mode")
+    if mm == "tf32":
+        gpu = (train_env or {}).get("gpu", "")
+        fmt += f"; training matmuls in TF32 ({'A100' if 'A100' in gpu else gpu}), evaluation in fp32"
     cfg = {
-        "version": "v1",
+        "version": version,
         "input": {"shape": "[T, 512]", "dtype": "float32",
                   "what": "EmbeddingGemma 2 audio soft tokens (embed_audio output), 25 per second"},
         "context": "bidirectional within the window",
@@ -103,8 +110,8 @@ def write_config(reader_dir, model_scale, n_vocab, table_shape, arch, params):
         "window": {"seconds": 30, "left_overlap_tokens": 96, "right_extra_tokens": 1,
                    "note": "encoder is causal; the 83 tokens at the start of a window and its last token differ from a continuous "
                            "run (fixtures/long-speckled-band: soft_tokens_w30 vs soft_tokens_continuous)"},
-        "weights": {"file": "reader.pt", "format": "torch state_dict, float32",
-                    "code": "train/model.py Reader(arch, n_vocab, k)",
+        "weights": {"file": "reader.pt", "format": fmt,
+                    "code": "train/model.py Reader(arch, n_vocab, k, layers)",
                     "keys": "body.* (reader body), blank.weight [1, 768], blank.bias [1], "
                             "log_scale (scale = exp(log_scale))"},
         "n_vocab": n_vocab,
@@ -125,12 +132,15 @@ def main():
     ap.add_argument("--spans", default=None, help="r1 probe spans (npz: utt, word, s, e) for the length analysis")
     ap.add_argument("--lexicon", default=None, help="librispeech-lexicon.txt for the homophone share")
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
+    ap.add_argument("--device", default=default_device())
+    ap.add_argument("--version", default="v1", help="the version field of reader_config.json (with --from-run)")
     ap.add_argument("--pad-to", type=int, default=64, help="pad each batch's time axis to a multiple of this (0 = off)")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     if args.device == "mps":
         limit_mps_memory(40.0)
+    if args.device == "cuda":
+        cuda_matmul("ieee")
 
     if args.from_run:
         with open(os.path.join(args.from_run, "metrics.json"), encoding="utf-8") as f:
@@ -140,7 +150,7 @@ def main():
         sd = torch.load(os.path.join(args.reader_dir, "reader.pt"), map_location="cpu", weights_only=True)
         table_shape = np.load(os.path.join(args.reader_dir, "word_table.npy"), mmap_mode="r").shape
         write_config(args.reader_dir, float(sd["log_scale"].exp()), metrics["vocab"], table_shape,
-                     arch, metrics["params"])
+                     arch, metrics["params"], args.version, metrics.get("env"))
         log(f"exported {args.from_run}/best_model.pt (epoch {metrics['best_epoch']}) -> {args.reader_dir}")
 
     model, table, vocab, cfg = load_reader_dir(args.reader_dir, args.device)

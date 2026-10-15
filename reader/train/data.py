@@ -33,11 +33,17 @@ def read_index(cache_dir, split):
 
 
 class Split:
-    """One cached split: ids, lengths, transcripts and word ids (None when a word is out of vocabulary)."""
+    """One cached split, or several joined with commas ("train-clean-100,train-clean-360,train-other-500"): ids,
+    lengths, transcripts and word ids (None when a word is out of vocabulary), in index order, split after split."""
 
     def __init__(self, cache_dir, split, word_index):
         self.cache_dir, self.name = cache_dir, split
-        rows = read_index(cache_dir, split)
+        self.parts = split.split(",")
+        rows, self.dirs = [], []
+        for part in self.parts:
+            part_rows = read_index(cache_dir, part)
+            rows += part_rows
+            self.dirs += [part] * len(part_rows)
         self.ids = [r[0] for r in rows]
         self.n_tokens = np.array([r[1] for r in rows], dtype=np.int64)
         self.texts = [r[2] for r in rows]
@@ -53,7 +59,19 @@ class Split:
         return [i for i, w in enumerate(self.word_ids) if w is not None]
 
     def tokens(self, i):
-        return np.load(os.path.join(self.cache_dir, self.name, f"{self.ids[i]}.npy")).astype(np.float32)
+        return np.load(os.path.join(self.cache_dir, self.dirs[i], f"{self.ids[i]}.npy")).astype(np.float32)
+
+    def part_stats(self):
+        """-> {part: utterances, hours, in-vocabulary utterances and hours, utterances left out (OOV)}."""
+        out = {}
+        for part in self.parts:
+            idx = [i for i, d in enumerate(self.dirs) if d == part]
+            keep = [i for i in idx if self.word_ids[i] is not None]
+            out[part] = {"utterances": len(idx), "hours": round(float(self.n_tokens[idx].sum()) / 25 / 3600, 3),
+                         "tokens": int(self.n_tokens[idx].sum()), "in_vocab_utterances": len(keep),
+                         "in_vocab_hours": round(float(self.n_tokens[keep].sum()) / 25 / 3600, 3),
+                         "oov_left_out": len(idx) - len(keep)}
+        return out
 
 
 def ctc_feasible(n_tokens, word_ids):

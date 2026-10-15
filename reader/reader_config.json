@@ -1,5 +1,5 @@
 {
- "version": "v1",
+ "version": "v2",
  "input": {
   "shape": "[T, 512]",
   "dtype": "float32",
@@ -9,7 +9,7 @@
  "architecture": {
   "name": "a",
   "kind": "transformer encoder from scratch",
-  "layers": 4,
+  "layers": 6,
   "d_model": 512,
   "heads": 8,
   "ffn": 2048,
@@ -18,14 +18,14 @@
   "positions": "rotary (base 10000)",
   "input": "LayerNorm -> Linear 512->512",
   "output": "LayerNorm -> Linear 512->768",
-  "params": 13268994
+  "params": 19573762
  },
  "output": {
   "vector": "[T, 768] L2-normalized",
   "blank_logit": "[T]"
  },
  "logits": "scale * cos(vector, table[w]) for w in vocab; blank from blank_logit",
- "scale": 91.21830749511719,
+ "scale": 216.3509979248047,
  "vocab": "vocab.txt",
  "table": {
   "file": "word_table.npy",
@@ -43,34 +43,34 @@
  },
  "weights": {
   "file": "reader.pt",
-  "format": "torch state_dict, float32",
-  "code": "train/model.py Reader(arch, n_vocab, k)",
+  "format": "torch state_dict, float32; training matmuls in TF32 (A100), evaluation in fp32",
+  "code": "train/model.py Reader(arch, n_vocab, k, layers)",
   "keys": "body.* (reader body), blank.weight [1, 768], blank.bias [1], log_scale (scale = exp(log_scale))"
  },
  "n_vocab": 200000,
  "wer": {
   "dev-clean": {
-   "wer": 0.06566,
+   "wer": 0.03754,
    "utterances": 2703,
    "ref_words": 54402
   },
   "dev-other": {
-   "wer": 0.14927,
+   "wer": 0.10263,
    "utterances": 2864,
    "ref_words": 50948
   },
   "test-clean": {
-   "wer": 0.06807,
+   "wer": 0.04207,
    "utterances": 2620,
    "ref_words": 52576
   },
   "test-other": {
-   "wer": 0.15102,
+   "wer": 0.10422,
    "utterances": 2939,
    "ref_words": 52343
   },
   "fixtures": {
-   "wer": 0.04806,
+   "wer": 0.03697,
    "utterances": 20,
    "ref_words": 541
   },

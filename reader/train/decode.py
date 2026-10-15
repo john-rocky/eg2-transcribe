@@ -20,7 +20,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from model import Reader, collapse, greedy_labels, limit_mps_memory  # noqa: E402
+from model import Reader, collapse, cuda_matmul, default_device, greedy_labels, limit_mps_memory  # noqa: E402
 
 
 def load_table(path, device):
@@ -35,7 +35,7 @@ def load_reader_dir(reader_dir, device):
     with open(os.path.join(reader_dir, cfg["vocab"]), encoding="utf-8") as f:
         vocab = [line.rstrip("\n") for line in f if line.strip()]
     arch = cfg["architecture"]
-    model = Reader(arch["name"], len(vocab), k=arch.get("k", 4))
+    model = Reader(arch["name"], len(vocab), k=arch.get("k", 4), layers=arch["layers"] if arch["name"] == "a" else 4)
     model.load_state_dict(torch.load(os.path.join(reader_dir, "reader.pt"), map_location="cpu", weights_only=True))
     model = model.to(device).eval()
     table = load_table(os.path.join(reader_dir, cfg["table"]["file"]), device)
@@ -86,11 +86,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reader-dir", required=True, help="directory with reader.pt, reader_config.json, vocab, table")
     ap.add_argument("--fixtures", default=None, help="directory searched for */soft_tokens.npy")
-    ap.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
+    ap.add_argument("--device", default=default_device())
     ap.add_argument("npy", nargs="*", help="soft token files, float [T, 512]")
     args = ap.parse_args()
     if args.device == "mps":
         limit_mps_memory(40.0)
+    if args.device == "cuda":
+        cuda_matmul("ieee")
     model, table, vocab, _ = load_reader_dir(args.reader_dir, args.device)
     paths = list(args.npy)
     if args.fixtures:

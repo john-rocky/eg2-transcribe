@@ -90,6 +90,30 @@ epochs peaked at 34.7 to 38.6 GB). v1 trained 8 epochs (epoch 1 is the `cmp_a` c
 budget of step 4: 17.8 to 23.7 min of training per epoch, 157.6 min in total, plus 5.5 min of dev-clean decoding
 (2.72 h). The released weights are those of epoch 8 (best dev-clean WER). Step 5 takes about 1.5 min (22 s per split).
 
+## Compute used for v2 (CUDA, the 960 h set, 6 layers)
+
+v2 ran the same scripts on one NVIDIA A100-SXM4-80GB (Google Colab; torch 2.11.0+cu130, CUDA 13.0, Python 3.13):
+
+- `--device cuda` (the default when CUDA is present); the scripts also run on MPS and the CPU as before.
+- Several training splits joined by commas: `--train-split train-clean-100,train-clean-360,train-other-500` reads the
+  three sets as one per epoch (281,241 utterances; the 19,755 with a word outside the vocabulary are left out, 261,486
+  remain, 890.2 h, 80,121,094 tokens, 16,343 steps per epoch).
+- `--layers 6`: arch a with six transformer layers instead of four (19,573,762 parameters; `model.py --layers 6`
+  prints the count).
+- `--matmul tf32`: the training matmuls and convolutions on TF32 tensor cores (2.4 times the float32 speed per token
+  on the A100); every dev-clean decode during training switches back to full float32 (`ieee`), and `eval_wer.py`
+  decodes in float32. `--matmul ieee` (the default) keeps everything in float32.
+- Soft tokens: `cache_soft_tokens.py` on the same GPU with 16 utterances of similar length per encoder call
+  (`--batch-size 16`) and 10 processes for FLAC decoding and log-mel (`--workers 10`), float32 with TF32 off, stored as
+  float16: 961.1 h of training audio in 80.6 min (×715). Against one utterance at a time the per-token cosine stays at
+  or above 0.999999994.
+- `--stop-file` stops a run at the start of an epoch; `eval_wer.py --version v2` writes the version into
+  `reader_config.json`.
+
+The released run: 9 epochs (early stop, patience 2; best dev-clean WER at epoch 7), 29.1 to 29.5 min of training per
+epoch, 4.38 h in total plus 2 min of dev-clean decoding; peak reserved GPU memory 13.4 GB. The command is in
+`../RELEASE.md`.
+
 ## Memory on Apple silicon
 
 The normalizer over 200,000 words works on `[512, 200000]` float32 blocks. Every block has the same size (the last

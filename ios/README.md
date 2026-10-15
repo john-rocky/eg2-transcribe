@@ -27,7 +27,7 @@ reader_config.json   the reader's window contract and vocabulary file (written b
 vocab.txt            one word per line; the line number is the reader's word index
 mel_filters.bin      the log-mel filter bank, 257 × 128 float64 (tools/make_mel_filters.py)
 SHA256SUMS           the SHA-256 of every file (optional; part of the folder's fingerprint)
-macos/               eg2_audio_fp16_T3000.aimodel, eg2_reader_fp16_T750.aimodel (specialized when the app loads them);
+macos/               eg2_audio_fp16_T3000.aimodel, eg2_reader_v2_fp16_T750.aimodel (specialized when the app loads them);
                      the split-encoder form also needs eg2_front_layer7_fp32_T3000.aimodel and
                      eg2_body_layer7_fp16_T3000.aimodel here (not in the published folder: Settings lists it only then)
 ios/                 the same .aimodel bundles, for any iPhone
@@ -40,8 +40,9 @@ On the iPhone the app looks in `ios-<arch>/` for its own chip and falls back to 
 - **iPhone**: `Documents/models/eg2-transcribe` of the app (copy it with the Files app, or
   `xcrun devicectl device copy to … --domain-type appDataContainer --domain-identifier com.coreai.eg2transcribe`).
 - **Mac**: `~/Documents/models/eg2-transcribe`, or any folder picked with *Choose model folder…*.
-- **Download**: `ModelFiles.repo` in `Sources/Models/ModelFiles.swift` names the Hugging Face repo. It is `TODO`
-  until the repo is published; then the app offers *Download* (the shared files and this device's bundle folder).
+- **Download**: `ModelFiles.repo` in `Sources/Models/ModelFiles.swift` names the Hugging Face repo
+  (`mlboydaisuke/EmbeddingGemma-2-Transcribe-CoreAI`); the app offers *Download* (the shared files and this device's
+  bundle folder).
 
 ### When the model folder changes
 
@@ -76,14 +77,14 @@ output becomes float16 when the next stage takes float16).
   "forms": [
     {"id": "gpu", "title": "Encoder GPU · reader GPU",
      "stages": [{"name": "encoder", "bundle": "eg2_audio_fp16_T3000", "compute": "gpu"},
-                {"name": "reader", "bundle": "eg2_reader_fp16_T750", "compute": "gpu"}]},
+                {"name": "reader", "bundle": "eg2_reader_v2_fp16_T750", "compute": "gpu"}]},
     {"id": "gpu-ane", "title": "Encoder GPU · reader Neural Engine", "platforms": ["macos"],
      "stages": [{"name": "encoder", "bundle": "eg2_audio_fp16_T3000", "compute": "gpu"},
-                {"name": "reader", "bundle": "eg2_reader_fp16_T750", "compute": "ane"}]},
+                {"name": "reader", "bundle": "eg2_reader_v2_fp16_T750", "compute": "ane"}]},
     {"id": "split7-gpu", "title": "Encoder in two bundles (GPU, Neural Engine) · reader GPU", "platforms": ["macos"],
      "stages": [{"name": "front", "bundle": "eg2_front_layer7_fp32_T3000", "compute": "gpu"},
                 {"name": "body", "bundle": "eg2_body_layer7_fp16_T3000", "compute": "ane"},
-                {"name": "reader", "bundle": "eg2_reader_fp16_T750", "compute": "gpu"}]}
+                {"name": "reader", "bundle": "eg2_reader_v2_fp16_T750", "compute": "gpu"}]}
   ]
 }
 ```
@@ -142,27 +143,28 @@ transcript's text size for that launch (Settings → Display → Transcript text
 
 ## Numbers
 
-Reader v1 and the published model folder, Release builds, 2026-10-14 (Mac: macOS 27.0; iPhone: iOS 27.2, on USB
-power). Long recording: *The Adventure of the Speckled Band* (LibriVox, 54 min 17 s, 125 windows), reference text from
-Project Gutenberg; the reference (torch) path's WER on it is 5.78 %.
+Release builds on the model folder. Mac (macOS 27.0): reader v2, 2026-10-15. iPhone 18 Pro (iOS 27.2, on USB power):
+reader v1, 2026-10-14; reader v2 on the iPhone is not measured yet. Long recording: *The Adventure of the Speckled
+Band* (LibriVox, 54 min 17 s, 125 windows), reference text from Project Gutenberg; the reference (torch) path's WER on
+it is 3.81 % with reader v2 and 5.78 % with reader v1.
 
-| Device | Form | Overlap | 54-min recording (windows) | Times real time | Decode + log-mel | WER |
-|---|---|---|---|---|---|---|
-| Mac (M4 Max) | encoder GPU · reader Neural Engine (default) | on | 5.48 s | 594× | 0.63 s + 0.05 s | 5.78 % |
-| Mac (M4 Max) | encoder GPU · reader Neural Engine | off | 10.45 s | 312× | | 5.78 % |
-| Mac (M4 Max) | encoder GPU · reader GPU | on | 7.29 s | 447× | | 5.77 % |
-| Mac (M4 Max) | encoder GPU · reader GPU | off | 7.86 s | 414× | | 5.77 % |
-| iPhone 18 Pro | encoder GPU · reader GPU (default) | off | 11.63 s | 280× | 0.49 s + 0.16 s | 5.77 % |
-| iPhone 18 Pro | encoder GPU · reader GPU | on | 11.68 s | 279× | | 5.77 % |
+| Device | Reader | Form | Overlap | 54-min recording (windows) | Times real time | Decode + log-mel | WER |
+|---|---|---|---|---|---|---|---|
+| Mac (M4 Max) | v2 | encoder GPU · reader Neural Engine (default) | on | 5.95 s | 548× | 0.66 s + 0.05 s | 3.82 % |
+| Mac (M4 Max) | v2 | encoder GPU · reader Neural Engine | off | 10.91 s | 299× | | 3.82 % |
+| Mac (M4 Max) | v2 | encoder GPU · reader GPU | on | 7.40 s | 440× | | 3.83 % |
+| Mac (M4 Max) | v2 | encoder GPU · reader GPU | off | 8.06 s | 404× | | 3.83 % |
+| iPhone 18 Pro | v1 | encoder GPU · reader GPU (default) | off | 11.63 s | 280× | 0.49 s + 0.16 s | 5.77 % |
+| iPhone 18 Pro | v1 | encoder GPU · reader GPU | on | 11.68 s | 279× | | 5.77 % |
 
 The iPhone's passes slow down as the GPU stays busy, even while the thermal state reads nominal: four alternating
 passes, each started at nominal, took 11.63 (off), 11.68 (on), 12.37 (off) and 14.34 s (on).
 
 From launch to the transcript of a 10 s clip: right after a model folder change (the app clears Core AI's cache,
-then loads) 5.21 s on the Mac, where the reader is specialized for the Neural Engine, and 1.28 s on the iPhone, whose
-bundles are compiled ahead of time; later launches 0.50 s and 0.51 s. A launch right after installing the app on
-the iPhone took longer in an earlier measurement with an interim reader: 11.5 s, the opening calls of the two bundles
-taking 9.3 s and 1.0 s.
+then loads) 8.49 s on the Mac with reader v2, where the reader is specialized for the Neural Engine (5.59 s of it),
+and 1.28 s on the iPhone with reader v1, whose bundles are compiled ahead of time; later launches 0.57 s and 0.51 s. A
+launch right after installing the app on the iPhone took longer in an earlier measurement with an interim reader:
+11.5 s, the opening calls of the two bundles taking 9.3 s and 1.0 s.
 
 Checks: the app's log-mel is within 4.8e-7 of the extractor's on the 20 fixture utterances (bit-identical on the Mac
 and the iPhone); through the float32 encoder its soft tokens match the reference to a per-token cosine of 0.9999999995.
