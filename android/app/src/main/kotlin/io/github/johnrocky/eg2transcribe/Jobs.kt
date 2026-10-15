@@ -89,12 +89,10 @@ object Jobs {
             }.also { l ->
                 val e = l.encoder
                 val npu = l.npu
-                Session.engineLine = "Encoder on ${e.backend.label}" + (if (e.backend == Backend.CPU) " (${e.threads} threads)" else "") +
-                    " · " + (if (e.backend == Backend.NPU && npu?.prepared?.cachedBefore == true) "loaded from its cache in ${secs(e.compileMs)}"
-                    else "compiled in ${secs(e.compileMs)}" + (if (e.backend == Backend.NPU) " (first time; later starts read the cache)" else "")) +
-                    " · ${e.file.name} (${e.signatureNames.joinToString(", ")})"
+                Session.engineLine = l.note + " · " + (if (e.backend == Backend.NPU && npu?.prepared?.cachedBefore == true) "loaded from its cache in ${secs(e.compileMs)}"
+                    else "compiled in ${secs(e.compileMs)}" + (if (e.backend == Backend.NPU) " (first time; later starts read the cache)" else ""))
                 Session.fallbackLine = l.fallback
-                Log.i(TAG, "ENGINE_READY requested=${l.requested.id} used=${e.backend.id} compile_ms=${fmt(e.compileMs)} warmup_ms=${e.warmupMs} model=${e.file.name} bytes=${e.file.length()} fallback=${l.fallback != null}" +
+                Log.i(TAG, "ENGINE_READY requested=${l.requested.id} used=${e.backend.id} compile_ms=${fmt(e.compileMs)} warmup_ms=${e.warmupMs} model=${e.file.name} bytes=${l.stamp.bytes} sha256=${l.stamp.sha256} sha256_ms=${l.stamp.sha256Ms?.let { fmt(it) }} fallback=${l.fallback != null}" +
                     (npu?.let { " npu_dispatch=${it.dispatch} npu_cached_before=${it.prepared?.cachedBefore} npu_cache_bytes=${it.cacheBytesAfter} npu_error=${it.error}" } ?: ""))
             }
             val rs = Engine.ensureReader(context, l.encoder.backend, windowFor(l, frames), Session.readerPrecision) { stage ->
@@ -505,9 +503,10 @@ object Jobs {
                     "calls" to JSONObject().apply { for ((k, v) in r.calls.all()) put(k, jsonArray(v)) },
                     "call_medians" to JSONObject().apply { for ((k, v) in callMedians) put(k, v) },
                 ),
-                "encoder_run" to jsonOf("file" to loaded.encoder.file.name, "used" to loaded.encoder.backend.id, "compile_ms" to loaded.encoder.compileMs,
-                    "signatures" to jsonArray(loaded.encoder.signatureNames)),
-                "reader_run" to jsonOf("file" to (tr?.file?.name ?: readers.reader.name), "stub" to readers.reader.isStub, "used" to tr?.backend?.id,
+                "encoder_run" to jsonOf("file" to loaded.encoder.file.name, "bytes" to loaded.stamp.bytes, "sha256" to loaded.stamp.sha256,
+                    "used" to loaded.encoder.backend.id, "compile_ms" to loaded.encoder.compileMs, "signatures" to jsonArray(loaded.encoder.signatureNames)),
+                "reader_run" to jsonOf("file" to (tr?.file?.name ?: readers.reader.name), "bytes" to readers.stamp?.bytes, "sha256" to readers.stamp?.sha256,
+                    "stub" to readers.reader.isStub, "used" to tr?.backend?.id,
                     "precision" to tr?.precision, "tokens" to tr?.tokens, "compile_ms" to tr?.compileMs, "fallback" to readers.fallback),
                 "tokens" to r.plan.tokens, "blanks" to r.blanks, "words" to r.words.size, "transcript" to text,
                 "warnings" to jsonArray(r.warnings),
@@ -540,8 +539,10 @@ object Jobs {
             "status" to status, "text" to text, "time" to OwnLog.now(),
             "device" to Engine.deviceJson(context), "input" to input,
             "model" to modelChoice(context).let { c ->
+                // note = the screen's Encoder line without the compile time; load.sha256_ms = reading the file for its SHA-256.
                 jsonOf(
-                    "chosen" to Session.modelName, "name" to c.name, "file" to l?.encoder?.file?.name, "bytes" to l?.encoder?.file?.length(),
+                    "chosen" to Session.modelName, "name" to c.name, "note" to l?.note, "file" to l?.encoder?.file?.name, "bytes" to l?.encoder?.file?.length(),
+                    "sha256" to l?.stamp?.sha256, "load" to l?.let { jsonOf("sha256_ms" to it.stamp.sha256Ms) },
                     "files" to jsonArray(c.files.map { jsonOf("name" to it.name, "bytes" to it.length()) }),
                 )
             },
@@ -565,7 +566,8 @@ object Jobs {
                 val t = rs.tflite
                 jsonOf(
                     "name" to rs.reader.name, "stub" to rs.reader.isStub, "words" to rs.vocab.size, "note" to rs.note,
-                    "file" to t?.file?.name, "bytes" to t?.file?.length(), "requested" to rs.requested?.id, "used" to t?.backend?.id,
+                    "file" to t?.file?.name, "bytes" to t?.file?.length(), "sha256" to rs.stamp?.sha256,
+                    "load" to rs.stamp?.let { jsonOf("sha256_ms" to it.sha256Ms) }, "requested" to rs.requested?.id, "used" to t?.backend?.id,
                     "fallback" to rs.fallback, "tokens" to t?.tokens, "slices" to t?.slices, "compile_ms" to t?.compileMs,
                     "warmup_ms" to t?.warmupMs, "threads" to t?.threads, "window_frames" to rs.windowFrames, "precision" to t?.precision,
                     "files" to jsonArray(rs.key.map { (n, b) -> jsonOf("name" to n, "bytes" to b) }),

@@ -83,3 +83,21 @@ class ModelChoice private constructor(
 /** "589 MB", "1.18 GB". */
 internal fun megabytes(bytes: Long): String =
     if (bytes >= 1L shl 30) String.format(java.util.Locale.US, "%.2f GB", bytes / 1e9) else String.format(java.util.Locale.US, "%.0f MB", bytes / 1e6)
+
+/**
+ * A model file as the screen and the run report name it: its name, its size and its SHA-256, read once when the file
+ * is loaded (work thread), and the ms that read took. [sha256] is null when the file could not be read for it.
+ */
+class FileStamp(val file: File, val bytes: Long, val sha256: String?, val sha256Ms: Double?) {
+    /** "reader_w30.tflite (387 MB, sha256 129d6aa2d829)": the first 12 hex digits, as the NPU cache names its entries. */
+    val label: String get() = "${file.name} (${megabytes(bytes)}" + (sha256?.let { ", sha256 ${it.take(12)}" } ?: "") + ")"
+
+    companion object {
+        /** Reads [file] to its end for the SHA-256; a read error leaves the hash out. */
+        fun of(file: File): FileStamp {
+            val t = System.nanoTime()
+            val sha = runCatching { Npu.sha256(file) }.getOrNull()
+            return FileStamp(file, file.length(), sha, if (sha != null) (System.nanoTime() - t) / 1e6 else null)
+        }
+    }
+}

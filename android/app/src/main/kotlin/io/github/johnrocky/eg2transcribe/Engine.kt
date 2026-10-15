@@ -57,6 +57,10 @@ object Engine {
         val delegateLines: List<String>,
         /** The NPU attempt behind this load (also when it fell back); null when the NPU was not asked for. */
         val npu: NpuAttempt?,
+        /** The file that runs ([Encoder.file]) with its size and SHA-256, read in this load. */
+        val stamp: FileStamp,
+        /** The screen's Encoder line without the compile time ([encoderNote]); the run report's `model.note`. */
+        val note: String,
     )
 
     /** An NPU attempt: the cache, the compile, whether LiteRT's dispatch delegate took the graph, and the error if it failed. */
@@ -85,6 +89,8 @@ object Engine {
         val key: List<Pair<String, Long>>,
         /** The GPU precision asked for (fp32 unless a launch extra set another). */
         val precision: ReaderPrecision = ReaderPrecision.FP32,
+        /** The reader file with its size and SHA-256, read in this load; null for the stub. */
+        val stamp: FileStamp? = null,
     ) {
         val tflite: TfliteReader? get() = reader as? TfliteReader
     }
@@ -143,10 +149,10 @@ object Engine {
                         onStage("Compiling the reader for the CPU…")
                         TfliteReader.open(context, file!!, Backend.CPU, vocab.size, CPU_THREADS)
                     }
-                    Log.i(TAG, "READER file=${r.file.name} bytes=${r.file.length()} backend=${r.backend.id} precision=${r.precision} tokens=${r.tokens} slices=${r.slices} words=${vocab.size} compile_ms=${Jobs.fmt(r.compileMs)} warmup_ms=${Jobs.fmt(r.warmupMs)} fallback=${fallback != null}")
-                    val note = "Reader v1 on ${r.backend.label}" + (if (r.precision == ReaderPrecision.FP16_ACC32.id) " (fp16, fp32 accumulation)" else "") +
-                        " · ${r.file.name} (${megabytes(r.file.length())}) · ${"%,d".format(java.util.Locale.US, vocab.size)} words"
-                    return ReaderSet(r, vocab, note, want, fallback, windowFrames, key, precision)
+                    onStage("Reading ${r.file.name} for its SHA-256…")
+                    val stamp = FileStamp.of(r.file)
+                    Log.i(TAG, "READER file=${r.file.name} bytes=${stamp.bytes} sha256=${stamp.sha256} sha256_ms=${stamp.sha256Ms?.let { Jobs.fmt(it) }} backend=${r.backend.id} precision=${r.precision} tokens=${r.tokens} slices=${r.slices} words=${vocab.size} compile_ms=${Jobs.fmt(r.compileMs)} warmup_ms=${Jobs.fmt(r.warmupMs)} fallback=${fallback != null}")
+                    return ReaderSet(r, vocab, readerNote(r.backend, r.precision, stamp, vocab.size), want, fallback, windowFrames, key, precision, stamp)
                 } catch (e: Throwable) {
                     why = "files/reader/ could not be used: ${e.message}"
                     Log.w(TAG, "READER_FALLBACK $why", e)
@@ -160,6 +166,16 @@ object Engine {
         val scanThreads = if (backend == Backend.CPU) 2 else SCAN_THREADS
         return ReaderSet(Stub.reader(vocab, scan, scanThreads), vocab, "Stub reader: the words are placeholders ($why)", readerBackend(backend), null, windowFrames, key, precision)
     }
+
+    /** The Reader line: "Reader on GPU fp32 · reader_w30.tflite (387 MB, sha256 129d6aa2d829) · 200,000 words". */
+    fun readerNote(backend: Backend, precision: String, stamp: FileStamp, words: Int): String =
+        "Reader on ${backend.label}" + (if (precision == ReaderPrecision.FP16_ACC32.id) " (fp16, fp32 accumulation)" else "") +
+            " · ${stamp.label} · ${"%,d".format(Locale.US, words)} words"
+
+    /** The Encoder line: "Encoder on GPU fp32 · eg2_audio_f16safe_fp16w_w30.tflite (589 MB, sha256 f0f6c37ee62b) · signature audio_30s". */
+    fun encoderNote(backend: Backend, threads: Int, stamp: FileStamp, signatures: List<String>): String =
+        "Encoder on ${backend.label}" + (if (backend == Backend.CPU) " ($threads threads)" else "") +
+            " · ${stamp.label} · " + (if (signatures.size == 1) "signature " else "signatures ") + signatures.joinToString(", ")
 
     /** The same files, accelerator, window length and precision: a reader (or a stub after a failed load) is not loaded again. */
     private fun current(r: ReaderSet, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int, precision: ReaderPrecision): Boolean =
@@ -235,8 +251,15 @@ object Engine {
         }
         val lines = OwnLog.delegateLines(since)
         for (l in lines) Log.i(TAG, "DELEGATE $l")
-        val w = loadKey(choice, backend, windowFrames) ?: enc!!.file
-        return Loaded(enc!!, backend, w, w.length(), fallback, lines, npu).also { loaded = it }
+        val e = enc!!
+        // The SHA-256 of the file that runs, once per load; an NPU load has it from Npu.prepare (its cache's link name).
+        val stamp = npu?.prepared?.takeIf { it.file == e.file }?.let { FileStamp(e.file, e.file.length(), it.sha256, it.sha256Ms) }
+            ?: run {
+                onStage("Reading ${e.file.name} for its SHA-256…")
+                FileStamp.of(e.file)
+            }
+        val w = loadKey(choice, backend, windowFrames) ?: e.file
+        return Loaded(e, backend, w, w.length(), fallback, lines, npu, stamp, encoderNote(e.backend, e.threads, stamp, e.signatureNames)).also { loaded = it }
     }
 
     /** The file a load for these settings is known by: the one [fileFor] picks, or for the NPU without a 10 s file the GPU's. */

@@ -83,4 +83,35 @@ class ModelFilesTest {
         val sha = "0123456789abcdef".repeat(4)
         assertEquals("eg2_audio_f16safe_fp16w_w10-0123456789ab", Npu.linkName("eg2_audio_f16safe_fp16w_w10", sha))
     }
+
+    @Test
+    fun theLinesNameTheFilesBySizeAndSha256() {
+        val f = File(dir, "reader_w30.tflite").apply { writeText("abc") }
+        val s = FileStamp.of(f)
+        assertEquals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", s.sha256) // SHA-256 of "abc" (FIPS 180-2)
+        assertEquals(3L, s.bytes)
+        assertTrue(s.sha256Ms!! >= 0.0)
+        assertEquals("reader_w30.tflite (0 MB, sha256 ba7816bf8f01)", s.label)
+        // The published files (README.md, The model files).
+        val rd = FileStamp(File("reader_w30.tflite"), 386_726_384, "129d6aa2d829dc4418675d01659ccc6fc42e33b84c2486f36faa9407d45c8716", 900.0)
+        assertEquals("Reader on GPU fp32 · reader_w30.tflite (387 MB, sha256 129d6aa2d829) · 200,000 words", Engine.readerNote(Backend.GPU_FP32, "fp32", rd, 200_000))
+        assertEquals(
+            "Reader on GPU fp32 (fp16, fp32 accumulation) · reader_w30.tflite (387 MB, sha256 129d6aa2d829) · 200,000 words",
+            Engine.readerNote(Backend.GPU_FP32, ReaderPrecision.FP16_ACC32.id, rd, 200_000),
+        )
+        val enc = FileStamp(File("eg2_audio_f16safe_fp16w_w30.tflite"), 589_273_696, "f0f6c37ee62b51372ab28013617aad53793a84aaddd96e1e844d0cea0eb2f11d", 1300.0)
+        assertEquals(
+            "Encoder on GPU fp32 · eg2_audio_f16safe_fp16w_w30.tflite (589 MB, sha256 f0f6c37ee62b) · signature audio_30s",
+            Engine.encoderNote(Backend.GPU_FP32, 4, enc, listOf("audio_30s")),
+        )
+        assertEquals(
+            "Encoder on CPU (4 threads) · eg2_audio_f16safe_fp16w_w30.tflite (589 MB, sha256 f0f6c37ee62b) · signatures audio_30s, audio_10s",
+            Engine.encoderNote(Backend.CPU, 4, enc, listOf("audio_30s", "audio_10s")),
+        )
+        // A file that could not be read for its hash is named by its size alone.
+        assertEquals("reader_w30.tflite (387 MB)", FileStamp(File("reader_w30.tflite"), 386_726_384, null, null).label)
+        val gone = FileStamp.of(File(dir, "gone.tflite"))
+        assertNull(gone.sha256)
+        assertNull(gone.sha256Ms)
+    }
 }
