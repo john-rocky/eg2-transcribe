@@ -1,6 +1,6 @@
 # Eg2 Transcribe for Android (LiteRT)
 
-Record with the microphone or open an audio file, and the app writes down the English words with their times, on the phone. The audio encoder of [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) runs on LiteRT (CPU, GPU or the Qualcomm NPU) and turns every 40 ms of audio into a vector; a small trained reader (reader v1, `reader/RELEASE.md`) maps each vector into the model's text space and the best of 200,000 words, or a blank, is read out. Without the reader's files the app runs a stub reader whose words are placeholders.
+Record with the microphone or open an audio file, and the app writes down the English words with their times, on the phone. The audio encoder of [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) runs on LiteRT (CPU, GPU or the Qualcomm NPU) and turns every 40 ms of audio into a vector; a small trained reader (reader v2, `reader/RELEASE.md`) maps each vector into the model's text space and the best of 200,000 words, or a blank, is read out. Without the reader's files the app runs a stub reader whose words are placeholders.
 
 The app has no INTERNET permission; audio, model and transcript stay on the phone.
 
@@ -21,8 +21,8 @@ The app needs five files, which are not in this repository. Download them from t
 |---|---:|---|---|
 | `eg2_audio_f16safe_fp16w_w30.tflite` | 589,273,696 | `f0f6c37ee62b51372ab28013617aad53793a84aaddd96e1e844d0cea0eb2f11d` | the encoder for 30 s windows (signature `audio_30s`) |
 | `eg2_audio_f16safe_fp16w_w10.tflite` | 589,015,376 | `1405986b353c3152e4a677d9446a5694a0f8fd0b13b794d26c892ef85295188c` | the encoder for 10 s windows (`audio_10s`; the NPU runs this one) |
-| `reader_w30.tflite` | 361,494,720 | `76bdcce94e7311ee36529727e4bfd94675fe225c9d361c5628e98f5c432742e8` | reader v1 with the word table, 30 s windows (`reader_30s`; The reader, below) |
-| `reader_w10.tflite` | 361,238,720 | `9419000ac89aa3f34478906dda81523f48bf0e8c802929df3345ba0850b72d3f` | the same for 10 s windows (`reader_10s`) |
+| `reader_w30.tflite` | 386,726,384 | `129d6aa2d829dc4418675d01659ccc6fc42e33b84c2486f36faa9407d45c8716` | reader v2 with the word table, 30 s windows (`reader_30s`; The reader, below) |
+| `reader_w10.tflite` | 386,470,384 | `128119442ca776deb5499f20189eac86c05060bd774e14fcb93d8bfd9e8c97fb` | the same for 10 s windows (`reader_10s`) |
 | `vocab.txt` | 1,737,588 | `bb3b3c70379082333e1bbd90d07ca69fe5c0096bd1c3b2b3f83edd65f1062a68` | the reader's 200,000 words, one per line (`reader/vocab.txt` of this repository) |
 
 The encoder files are the audio tower and `embed_audio` of `google/embeddinggemma-2` exported with litert-torch, one file per window length, with every RMSNorm rescaled so that its sums stay inside the float16 range (in float32 the rescaled graph gives the same numbers bit for bit; the GPU at float16 and the NPU need the rescaling) and the weights of the fully connected and convolution layers stored as float16. Inputs `mel` [1, F, 128] and `mask` [1, F] (F = 3000 or 1000 log-mel frames), outputs `soft` [1, F / 4, 512] and `mask` [1, F / 4]; masks are float32, 1 for a real frame or token. On the CPU and the GPU a recording of up to 9.96 s runs on the 10 s file and a longer one on the 30 s file; the NPU runs the 10 s file (Windows, below).
@@ -74,14 +74,14 @@ The NPU runs 10 s windows. Its compiler builds the graph on the phone, and for t
 
 ## The reader
 
-The reader is reader v1 of this repository (`reader/RELEASE.md`: a 4-layer transformer of 13.3 M parameters trained on LibriSpeech train-clean-100; greedy decoding, no language model). It reads a whole window of tokens at once, both ways in time, turns each 40 ms token into a direction in EmbeddingGemma 2's text space and scores it against the 200,000 words of `vocab.txt` (91.218 × the cosine to each word's text embedding) and against a blank: a token is its best word unless the blank scores higher, a run of the same word is one word, and blanks are dropped. Its known weaknesses (short words, homophones, read speech only) are listed in `reader/RELEASE.md`.
+The reader is reader v2 of this repository (`reader/RELEASE.md`: a 6-layer transformer of 19.6 M parameters trained on LibriSpeech's three training sets, 960 h; greedy decoding, no language model). It reads a whole window of tokens at once, both ways in time, turns each 40 ms token into a direction in EmbeddingGemma 2's text space and scores it against the 200,000 words of `vocab.txt` (216.351 × the cosine to each word's text embedding) and against a blank: a token is its best word unless the blank scores higher, a run of the same word is one word, and blanks are dropped. Its known weaknesses (long words, homophones, read speech only) are listed in `reader/RELEASE.md`. Reader v1 (4 layers, train-clean-100) has the same inputs, outputs and file names, so the app runs either file pair; its files are revision `54d0e902` of the Hugging Face repository.
 
 On the phone the reader, the word table and the choice of the best word are one LiteRT graph per window length, so the 200,000 scores of a token never leave the accelerator; the graph gives each token its best word, that word's score and the blank's score:
 
 | file | bytes | signature | inputs | outputs |
 |---|---|---|---|---|
-| `reader_w30.tflite` | 361,494,720 | `reader_30s` | `soft` [1, 750, 512], `mask` [1, 750] | `ids` [1, 750] int32, `best` [1, 750], `blank` [1, 750] |
-| `reader_w10.tflite` | 361,238,720 | `reader_10s` | `soft` [1, 250, 512], `mask` [1, 250] | `ids` [1, 250] int32, `best` [1, 250], `blank` [1, 250] |
+| `reader_w30.tflite` | 386,726,384 | `reader_30s` | `soft` [1, 750, 512], `mask` [1, 750] | `ids` [1, 750] int32, `best` [1, 750], `blank` [1, 750] |
+| `reader_w10.tflite` | 386,470,384 | `reader_10s` | `soft` [1, 250, 512], `mask` [1, 250] | `ids` [1, 250] int32, `best` [1, 250], `blank` [1, 250] |
 
 The word table sits in the graph as float16, the release's own values (`word_table.npy`, 307 MB of each file), and is used in float32; the reader itself is float32. A window with fewer real tokens (the end of a recording) is padded and masked. Put a file with the release's `vocab.txt` (1,737,588 bytes) in the app's `reader` directory:
 
@@ -92,9 +92,9 @@ adb push reader_w10.tflite /sdcard/Android/data/io.github.johnrocky.eg2transcrib
 adb push vocab.txt /sdcard/Android/data/io.github.johnrocky.eg2transcribe/files/reader/
 ```
 
-30 s windows need `reader_w30.tflite`; short recordings (auto) need `reader_w10.tflite`, and 10 s windows (the NPU) take it or the 30 s file (it pads). The reader runs on the accelerator the encoder runs on (on GPU fp32 when the encoder is on the NPU); when the GPU cannot compile it, it runs on the CPU and the screen says so. The Reader line on the screen names the file and the accelerator.
+30 s windows need `reader_w30.tflite`; short recordings (auto) need `reader_w10.tflite`, and 10 s windows (the NPU) take it or the 30 s file (it pads). The reader runs on the accelerator the encoder runs on (on GPU fp32 when the encoder is on the NPU); when the GPU cannot compile it, it runs on the CPU and the screen says so. The Reader line on the screen names the file and the accelerator. In this build that line begins with "Reader v1" whichever reader files are in place (a fixed label); the file's size on the same line tells which one runs (387 MB for reader v2, 361 MB for reader v1).
 
-The run report says how each window's calls were spent: `timing.calls` holds, per window, `encoder_write_ms` (the log-mel window and its mask into the input buffers), `encoder_run_ms` (the run call) and `encoder_read_ms` (the soft tokens and their mask back), and the same three for the reader, whose write includes padding the window and whose read is the word ids and the two scores; `timing.call_medians` has their medians, and the detail line under the progress line shows them as write, run, read. On the GPU the run call returns after a few milliseconds and the read waits for the GPU, so the GPU's time shows up in the read: for the example on a Pixel 8a, encoder write 0.4, run 74.6, read 396.5 ms and reader write 1.1, run 5.5, read 199.2 ms. `encoder_ms` and `reader_ms` are the three added up.
+The run report says how each window's calls were spent: `timing.calls` holds, per window, `encoder_write_ms` (the log-mel window and its mask into the input buffers), `encoder_run_ms` (the run call) and `encoder_read_ms` (the soft tokens and their mask back), and the same three for the reader, whose write includes padding the window and whose read is the word ids and the two scores; `timing.call_medians` has their medians, and the detail line under the progress line shows them as write, run, read. On the GPU the run call returns after a few milliseconds and the read waits for the GPU, so the GPU's time shows up in the read: for the example on a Pixel 8a with reader v2 (in the 20-fixture run below), encoder write 1.0, run 37.2, read 388.3 ms and reader write 0.9, run 9.1, read 208.8 ms. `encoder_ms` and `reader_ms` are the three added up.
 
 Without these files the app runs a stub reader and says "Stub reader: the words are placeholders": identity (the 512-d soft token is its own vector), a table of 1,000 placeholder words with random rows and a random blank vector, searched on the CPU. Its words are the 1,000 most frequent words of `reader/fixtures/long-speckled-band/transcript.txt` (`tools/make_stub_vocab.py`), its random numbers a fixed SplitMix64 sequence (`tools/stub_table.py` prints the same table). It keeps the app usable for the encoder alone.
 
@@ -112,7 +112,19 @@ LiteRT 2.2.0 has an NPU path for the Qualcomm SM8550, SM8650, SM8750 and SM8850.
 
 The LiteRT 2.2.0 AAR declares FOREGROUND_SERVICE, WAKE_LOCK, ACCESS_NETWORK_STATE and RECEIVE_BOOT_COMPLETED for its Play model delivery, which this app does not use; they are in the merged manifest.
 
-## What it did with auto windows (2026-10-14)
+## What it did with reader v2 (2026-10-15)
+
+The device check with this version (debug build, LiteRT 2.2.0, windows on auto) on a Pixel 8a, the two encoder files and the reader v2 files, in two sessions (5.2 and 6.4 minutes). The word error rate (WER) is counted on the 54-minute LibriVox fixture (`reader/fixtures/long-speckled-band`, 9,889 reference words) with the normalization of `reader/RELEASE.md`; the same windows through reader v2 in PyTorch on a computer give 3.812 %.
+
+| encoder and reader on | input | time | words |
+|---|---|---|---|
+| GPU fp32 | 54 min 17 s: auto picks 30 s windows (125) | 300.8 s (10.8× real time): encoder 1,510 ms, reader 989 ms per window | WER 3.812 % (377 errors): the PyTorch path's word or blank on all 81,436 tokens |
+| GPU fp32 | the 20 test-clean fixtures: 11 on the 10 s files, then 9 on the 30 s files | 36.8 s for the 20 | 20 of 20 transcripts equal to `reader/RELEASE.md`, the PyTorch path's word or blank on all 5,036 tokens |
+| CPU, 4 threads | the 20 fixtures | 158.0 s for the 20 | 20 of 20, all 5,036 tokens |
+
+Per window on the GPU the reader took 218.3 ms on the 10 s files and 710.3 ms on the 30 s files (medians over the fixtures; reader v1 205.4 and 627.8 ms on 2026-10-14) and the encoder 419.9 and 1,122.6 ms; over the 54 minutes the reader took 989 ms per window against reader v1's 839 ms (2026-10-14, an earlier build; thermal status 2 at the end of both runs). On the CPU the encoder itself ran 1.5–1.7 times slower than on 2026-10-14 (2.30 s and 6.85 s per 10 s and 30 s window), and the reader took 1.37 s and 4.19 s. The 54-minute run reached thermal status 2 in its second minute; reading the FLAC took 5.4 s on top; the app peaked at 5,267,760 kB (VmHWM) and the phone's MemAvailable fell to 873,848 kB while the app loaded its models. In the earlier session the 54-minute run came right after the CPU run: MemAvailable fell under the device check's own line of 800,000 kB while the app loaded the 10 s files at its start (auto loads them before it reads the file), and the check stopped the app; the later session ran it alone, on a rested phone.
+
+## What it did with auto windows, reader v1 (2026-10-14)
 
 The device check with this version (debug build, LiteRT 2.2.0, windows on auto) on a Pixel 8a, all five model files, in one session of 18.6 minutes:
 
@@ -131,7 +143,7 @@ A FLAC file is read by the app's own FLAC reader (`FlacDecoder.kt`), which check
 
 On a Pixel 8a the FLAC reader reads the 54-minute LibriVox FLAC in 5.15 s (633× real time: 2.6 s decoding, 2.4 s writing the samples out). Through MediaCodec the same file took 409.4 s, because that path costs about 3 ms of the app's own MediaCodec calls for every compressed frame (129,651 frames of 402 samples: queueInputBuffer 146.4 s, dequeueInputBuffer 59.5 s, releaseOutputBuffer 55.9 s and dequeueOutputBuffer 46.8 s, the extractor 29.4 s, copying the samples out 55.4 s, waiting for the codec 0.05 s; the Pixel's extractor decodes the FLAC itself and hands raw PCM to a pass-through codec). Driving MediaCodec with callbacks halved that, to 203.9 s. Every way gave the same 52,119,092 samples, bit for bit those of ffmpeg (SHA-256 of the 16-bit samples). The bundled example cut after 60 % of its bytes stops the FLAC reader in the middle of a frame; MediaCodec then read 73,728 of its 129,920 declared samples, and the app transcribed those. On a Galaxy S26 the MediaCodec path read the 54-minute file in 44 s (an earlier build). `--es decode_mode sync|async|legacy` sends FLAC through MediaCodec too, for measurements, and `--ez decode_only true` measures a file's read without the model.
 
-## What it did with the reader (2026-10-14)
+## What it did with reader v1 (2026-10-14)
 
 The device check below with this version (debug build, LiteRT 2.2.0), the fp16-weight 30 s encoder file and `reader_w30.tflite`. The word error rate (WER) is counted on the 54-minute LibriVox fixture (`reader/fixtures/long-speckled-band`, 9,889 reference words) with the normalization of `reader/RELEASE.md` (lower case, runs of spaces collapsed); the same windows through the reader in PyTorch on a computer give 5.784 %.
 
