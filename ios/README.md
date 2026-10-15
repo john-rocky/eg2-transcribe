@@ -144,7 +144,7 @@ transcript's text size for that launch (Settings → Display → Transcript text
 ## Numbers
 
 Release builds on the model folder. Mac (macOS 27.0): reader v2, 2026-10-15. iPhone 18 Pro (iOS 27.2, on USB power):
-reader v1, 2026-10-14; reader v2 on the iPhone is not measured yet. Long recording: *The Adventure of the Speckled
+reader v2, 2026-10-15, and reader v1, 2026-10-14. Long recording: *The Adventure of the Speckled
 Band* (LibriVox, 54 min 17 s, 125 windows), reference text from Project Gutenberg; the reference (torch) path's WER on
 it is 3.81 % with reader v2 and 5.78 % with reader v1.
 
@@ -154,15 +154,18 @@ it is 3.81 % with reader v2 and 5.78 % with reader v1.
 | Mac (M4 Max) | v2 | encoder GPU · reader Neural Engine | off | 10.91 s | 299× | | 3.82 % |
 | Mac (M4 Max) | v2 | encoder GPU · reader GPU | on | 7.40 s | 440× | | 3.83 % |
 | Mac (M4 Max) | v2 | encoder GPU · reader GPU | off | 8.06 s | 404× | | 3.83 % |
+| iPhone 18 Pro | v2 | encoder GPU · reader GPU (default) | off | 12.01 s | 271× | 0.51 s + 0.16 s | 3.81 % |
 | iPhone 18 Pro | v1 | encoder GPU · reader GPU (default) | off | 11.63 s | 280× | 0.49 s + 0.16 s | 5.77 % |
 | iPhone 18 Pro | v1 | encoder GPU · reader GPU | on | 11.68 s | 279× | | 5.77 % |
 
-The iPhone's passes slow down as the GPU stays busy, even while the thermal state reads nominal: four alternating
-passes, each started at nominal, took 11.63 (off), 11.68 (on), 12.37 (off) and 14.34 s (on).
+The iPhone's passes slow down as the GPU stays busy, even while the thermal state reads nominal: with reader v1, four
+alternating passes, each started at nominal, took 11.63 (off), 11.68 (on), 12.37 (off) and 14.34 s (on). With reader
+v2, two passes with overlap off took 12.04 s (started at thermal state fair) and 12.01 s (started at nominal).
 
 From launch to the transcript of a 10 s clip: right after a model folder change (the app clears Core AI's cache,
 then loads) 8.49 s on the Mac with reader v2, where the reader is specialized for the Neural Engine (5.59 s of it),
-and 1.28 s on the iPhone with reader v1, whose bundles are compiled ahead of time; later launches 0.57 s and 0.51 s. A
+and 1.40 s on the iPhone with reader v2, whose bundles are compiled ahead of time (that launch began at thermal state
+serious; reader v1: 1.28 s); later launches 0.57 s and 0.55 s (reader v1 on the iPhone: 0.51 s). A
 launch right after installing the app on the iPhone took longer in an earlier measurement with an interim reader:
 11.5 s, the opening calls of the two bundles taking 9.3 s and 1.0 s.
 

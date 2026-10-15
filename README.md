@@ -70,11 +70,9 @@ a stream of 30 s windows at 30.96 ms per window on the M4 Max with two windows i
 | Mac (M4 Max), macOS 27.0 | reader v2 + word table, one 30 s window, GPU | 23.85 ms |
 | Mac (M4 Max), macOS 27.0 | a 54-minute recording (3,257.4 s): encoder on the GPU, reader v2 on the Neural Engine, two windows in flight | 6.33 s (515× real time), WER 3.80 % |
 | iPhone 18 Pro, iOS 27.2 | encoder, one 30 s window, GPU (compiled ahead of time) | 59.60 ms |
-| iPhone 18 Pro, iOS 27.2 | reader v1 + word table, one 30 s window, GPU (reader v1's graph timed with an interim checkpoint's weights; reader v1 on the phone, through the app: fixture transcripts 20/20 = PyTorch, WER 5.77 %) | 32.99 ms |
+| iPhone 18 Pro, iOS 27.2 | reader v2 + word table, one 30 s window, GPU (compiled ahead of time) | 34.76 ms |
 | Mac (M4 Max), macOS 27.0 | the app on the 54-minute recording, its default: encoder on the GPU, reader v2 on the Neural Engine, two windows in flight | 5.95 s (548× real time), WER 3.82 % |
-| iPhone 18 Pro, iOS 27.2 | the app with reader v1 on the 54-minute recording, its default: encoder and reader on the GPU, one window at a time | 11.63 s (280× real time), WER 5.77 % |
-
-Reader v2 on the iPhone: not yet measured (the iPhone rows above are reader v1's).
+| iPhone 18 Pro, iOS 27.2 | the app on the 54-minute recording, its default: encoder and reader v2 on the GPU, one window at a time | 12.01 s (271× real time), WER 3.81 % |
 
 The Mac app with reader v1 on an 8.6 s LibriVox clip, from the file to its 27 words in 109 ms:
 [12-second screen recording](https://github.com/john-rocky/coreai-assets/blob/main/demos/eg2-transcribe-coreai-mac-20261014.mp4) (`demos/eg2-transcribe-coreai-mac-20261014.mp4` in coreai-assets).
