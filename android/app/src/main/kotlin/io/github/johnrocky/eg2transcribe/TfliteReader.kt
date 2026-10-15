@@ -9,11 +9,11 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The trained reader (reader v1, `reader/RELEASE.md`) as one LiteRT graph per window length, word table and argmax
+ * The trained reader (the version `reader/RELEASE.md` describes) as one LiteRT graph per window length, word table and argmax
  * included: `reader_w30.tflite` (signature `reader_30s`, 750 tokens) and `reader_w10.tflite` (`reader_10s`, 250).
  *
  * Inputs `soft` [1, T, 512] (the encoder's window) and `mask` [1, T] (1 = a real token); outputs `ids` [1, T] int32 (the
- * best of the 200,000 words: argmax of 91.218 x cosine to the word table), `best` [1, T] (that score) and `blank`
+ * best of the 200,000 words: argmax of the reader's scale x cosine to the word table; `scale` in `reader_config.json`, 91.218 for v1 and 216.351 for v2), `best` [1, T] (that score) and `blank`
  * [1, T] (the blank's score). A graph exported with the table in K slices gives `ids` / `best` as [1, T, K], one argmax
  * per slice of vocab / K words; the slice with the largest score wins (the lowest slice on a tie = the lowest word, as
  * torch's argmax). A token is blank when its blank score is above its best word's (the release's greedy rule).
