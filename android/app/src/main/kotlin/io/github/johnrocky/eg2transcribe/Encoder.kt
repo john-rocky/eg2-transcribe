@@ -10,6 +10,7 @@ import java.io.Closeable
 import java.io.File
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -32,10 +33,13 @@ enum class Backend(val id: String, val label: String) {
 }
 
 /**
- * The LiteRT thread and the process-wide Environment. Every CompiledModel call runs on this one thread. An APK that
- * carries the Qualcomm NPU libraries gets an Environment that knows their directory (dispatch and JIT compiler
- * plugin) and keeps compiled NPU graphs in [Npu.cacheRoot], and every graph it compiles, on any accelerator, asks for
- * the HTP's BURST mode: LiteRT 2.2.0 starts the NPU runtime once per process from the first graph's options.
+ * The LiteRT threads and the process-wide Environment. Every CompiledModel call runs on the LiteRT thread, except the
+ * reader's when the encoder runs on the NPU: that reader graph is compiled, run and closed on its own thread
+ * ([readerExecutor]), so that it reads window k on the GPU while the encoder runs window k + 1 on the NPU
+ * ([Engine.readerOwnThread], [Pipeline]). An APK that carries the Qualcomm NPU libraries gets an Environment that
+ * knows their directory (dispatch and JIT compiler plugin) and keeps compiled NPU graphs in [Npu.cacheRoot], and every
+ * graph it compiles, on any accelerator, asks for the HTP's BURST mode: LiteRT 2.2.0 starts the NPU runtime once per
+ * process from the first graph's options.
  *
  * LiteRT logs "NPU accelerator could not be loaded and registered: kLiteRtStatusErrorInvalidArgument" once per
  * process, about a second after this Environment registered the NPU accelerator: that is a second, internal
@@ -43,7 +47,12 @@ enum class Backend(val id: String, val label: String) {
  * which has no dispatch library directory. It does not change this one.
  */
 object LiteRt {
-    val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "litert").apply { isDaemon = true } }
+    val executor = Executors.newSingleThreadExecutor { r -> Thread(r, THREAD).apply { isDaemon = true } }
+
+    /** The reader's own thread, for a reader next to an encoder on the NPU. */
+    val readerExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, READER_THREAD).apply { isDaemon = true } }
+    private const val THREAD = "litert"
+    private const val READER_THREAD = "litert-reader"
     @Volatile private var env: Environment? = null
     @Volatile var npuPackaged = false
         private set
@@ -61,10 +70,15 @@ object LiteRt {
         }
     }
 
-    fun <T> call(block: () -> T): T {
-        if (Thread.currentThread().name == "litert") return block()
+    fun <T> call(block: () -> T): T = callOn(executor, THREAD, block)
+
+    /** [block] on the reader's own thread when [readerThread], else on the LiteRT thread. */
+    fun <T> on(readerThread: Boolean, block: () -> T): T = if (readerThread) callOn(readerExecutor, READER_THREAD, block) else call(block)
+
+    private fun <T> callOn(exec: ExecutorService, name: String, block: () -> T): T {
+        if (Thread.currentThread().name == name) return block()
         try {
-            return executor.submit(Callable { block() }).get()
+            return exec.submit(Callable { block() }).get()
         } catch (e: ExecutionException) {
             throw e.cause ?: e
         }

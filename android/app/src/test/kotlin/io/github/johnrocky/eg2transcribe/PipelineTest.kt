@@ -209,4 +209,91 @@ class PipelineTest {
         assertEquals((0 until 1433).map { g -> (g % 5 + 1).let { if (it == 3) Ctc.BLANK else it } }, rec.map { it.second })
         assertEquals(1433 / 5 * 4 + (1433 % 5).let { if (it >= 3) it - 1 else it }, r.words.size)
     }
+
+    /** One run's words, token records, onWords calls and onWindow order, for comparing two runs. */
+    private class Seen(val r: Pipeline.Result, val tokens: ByteArray, val said: List<String>, val windows: List<Int>) {
+        val words = r.words.map { "${it.firstToken}-${it.lastToken}:${it.text}" }
+    }
+
+    private fun runOnce(frames: Int, window: Int, readerExec: java.util.concurrent.ExecutorService?): Seen {
+        val pcm = FloatPcm(FloatArray((frames - 1) * 160 + 161))
+        val enc = FakeEncoder(WindowPlan(frames, window, 96), setOf(1000, 3000))
+        val windows = java.util.Collections.synchronizedList(ArrayList<Int>())
+        val said = java.util.Collections.synchronizedList(ArrayList<String>())
+        val tokens = ByteArrayOutputStream()
+        val r = Pipeline(enc, stub(), vocab, prep, decode, readerExec).run(pcm, window, 96, object : Pipeline.Listener {
+            override fun onWindow(k: Int, count: Int, audioSeconds: Double, elapsedMs: Double) { windows += k }
+            override fun onWords(words: List<Word>) { said += words.map { "${it.firstToken}:${it.text}" } }
+        }, dump = Pipeline.Dump(null, tokens))
+        return Seen(r, tokens.toByteArray(), said.toList(), windows.toList())
+    }
+
+    @Test
+    fun theReaderOnItsOwnThreadGivesTheSameWordsAndLabels() {
+        // The encoder on the NPU hands each window to the reader's own thread and runs the next one: the windows must
+        // reach the reader, the labels, the words and the listener in the same order as when the reader runs right
+        // after the encoder (10 s windows over 2,600 frames = 4 windows, 30 s windows over 5,732 frames = 3).
+        val readerThread = Executors.newSingleThreadExecutor { r -> Thread(r, "reader-test") }
+        try {
+            for ((frames, window) in listOf(2600 to 1000, 5732 to 3000)) {
+                val serial = runOnce(frames, window, null)
+                val overlap = runOnce(frames, window, readerThread)
+                assertTrue(overlap.r.readerOverlap)
+                assertTrue(!serial.r.readerOverlap)
+                assertEquals(serial.r.plan.count, overlap.r.encoderWaitMs.size)
+                assertTrue(serial.r.encoderWaitMs.isEmpty())
+                assertEquals((0 until serial.r.plan.count).toList(), serial.windows)
+                assertEquals(serial.windows, overlap.windows)
+                assertEquals(serial.r.windowFrames, overlap.r.windowFrames)
+                assertEquals(serial.r.readerMs.size, overlap.r.readerMs.size)
+                assertTrue(serial.words.isNotEmpty())
+                assertEquals(serial.words, overlap.words)
+                assertEquals(serial.said, overlap.said)
+                assertTrue(serial.tokens.isNotEmpty())
+                assertTrue(serial.tokens.contentEquals(overlap.tokens))
+                assertEquals(serial.r.blanks, overlap.r.blanks)
+                assertTrue(overlap.r.warnings.toString(), overlap.r.warnings.isEmpty())
+            }
+        } finally {
+            readerThread.shutdown()
+        }
+    }
+
+    @Test
+    fun theEncoderRunsTheNextWindowWhileTheReaderReads() {
+        // The reader of window 0 waits until the encoder has started window 1: only a reader on its own thread lets
+        // that happen (on the calling thread the encoder would wait for it). Reads run on the reader's thread.
+        val readerThread = Executors.newSingleThreadExecutor { r -> Thread(r, "reader-test") }
+        try {
+            val pcm = FloatPcm(FloatArray((2600 - 1) * 160 + 161))
+            val plan = WindowPlan(2600, 1000, 96)
+            val inner = FakeEncoder(plan, setOf(1000, 3000))
+            val second = java.util.concurrent.CountDownLatch(1)
+            val enc = object : EncoderRunner {
+                override val windowSizes = inner.windowSizes
+                override fun run(frames: Int, mel: FloatArray, mask: FloatArray): EncoderOutput {
+                    if (inner.calls == 1) second.countDown()
+                    return inner.run(frames, mel, mask)
+                }
+            }
+            val threads = java.util.Collections.synchronizedList(ArrayList<String>())
+            var overlapped = false
+            val stub = stub()
+            val reader = object : Reader by stub {
+                var k = 0
+                override fun read(soft: FloatArray, tokens: Int, valid: Int, from: Int, until: Int): Read {
+                    threads += Thread.currentThread().name
+                    if (k++ == 0) overlapped = second.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                    return stub.read(soft, tokens, valid, from, until)
+                }
+            }
+            val r = Pipeline(enc, reader, vocab, prep, decode, readerThread).run(pcm, 1000, 96, object : Pipeline.Listener {})
+            assertTrue("the encoder did not start window 1 while the reader read window 0", overlapped)
+            assertEquals(List(plan.count) { "reader-test" }, threads.toList())
+            assertEquals(plan.count, inner.calls)
+            assertEquals(650, r.words.size)
+        } finally {
+            readerThread.shutdown()
+        }
+    }
 }

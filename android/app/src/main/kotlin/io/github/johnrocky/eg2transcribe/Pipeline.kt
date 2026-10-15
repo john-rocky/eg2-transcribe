@@ -4,6 +4,7 @@ import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.ArrayDeque
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Future
 
@@ -29,6 +30,9 @@ class EncoderOutput(val soft: FloatArray, val mask: FloatArray, val ms: Double, 
  * PCM to words, window by window ([WindowPlan]): the log-mel of window k + 1 is computed on [prep] while the encoder
  * and then the reader's graph ([Reader.read]) run window k on the calling thread (the thread that owns the LiteRT
  * models), and the labels and the CTC collapse of window k run on [decode] (one thread, so words arrive in order).
+ * With [readerExec] (one thread, the one that owns the reader's graph) the reader's graph runs window k there while
+ * the encoder runs window k + 1 on the calling thread, at most two windows behind it; the windows reach the reader,
+ * the decode thread and the listener in the same order, so the words and the labels are those of the first form.
  */
 class Pipeline(
     private val encoder: EncoderRunner,
@@ -36,6 +40,7 @@ class Pipeline(
     private val vocab: List<String>,
     private val prep: ExecutorService,
     private val decode: ExecutorService,
+    private val readerExec: ExecutorService? = null,
 ) {
     interface Listener {
         /** After window [k] of [count]: [audioSeconds] of the recording are encoded, [elapsedMs] since the start. */
@@ -80,6 +85,10 @@ class Pipeline(
         val blanks: Int,
         val warnings: List<String>,
         val calls: Calls = Calls(),
+        /** True when the reader ran on its own thread, a window behind the encoder. */
+        val readerOverlap: Boolean = false,
+        /** Per window, with the reader on its own thread: how long the encoder's thread waited to hand the window over. */
+        val encoderWaitMs: List<Double> = emptyList(),
     )
 
     fun run(pcm: PcmSource, windowFrames: Int, overlapTokens: Int, listener: Listener, cancel: () -> Boolean = { false }, dump: Dump? = null): Result {
@@ -144,7 +153,25 @@ class Pipeline(
             if (fresh.isNotEmpty()) listener.onWords(fresh)
         }
 
+        // The reader's part of window k: its graph on the whole window, then the labels and words on the decode thread
+        // (at most 2 windows wait there), then the listener. On the calling thread right after the encoder, or on
+        // readerExec; [pending] belongs to whichever thread runs this.
         val pending = ArrayDeque<Future<*>>()
+        fun readWindow(k: Int, out: EncoderOutput, frames: Int, valid: Int) {
+            val r0 = System.nanoTime()
+            val read = reader.read(out.soft, frames / 4, valid, plan.keepFrom(k), plan.keepUntil(k))
+            readerMs += (System.nanoTime() - r0) / 1e6
+            calls.readerWriteMs += read.writeMs
+            calls.readerRunMs += read.runMs
+            calls.readerReadMs += read.readMs
+            while (pending.size >= 2) pending.removeFirst().get() // bounded queue: at most 2 windows wait for decoding
+            pending.addLast(decode.submit { decodeWindow(k, read, out.soft) })
+            val done = plan.kept(k).last + 1
+            listener.onWindow(k, plan.count, done * Ctc.SECONDS_PER_TOKEN, (System.nanoTime() - t0) / 1e6)
+        }
+
+        val reading = ArrayDeque<Future<*>>() // windows handed to readerExec and not read yet
+        val encoderWaitMs = ArrayList<Double>()
         var cancelled = false
         var next: Future<Int> = prep.submit<Int> { prepare(0) }
         try {
@@ -177,27 +204,34 @@ class Pipeline(
                     warnings += "window $k: the encoder marked $valid tokens valid, the plan expects $expected"
                     valid = minOf(valid, expected)
                 }
-                val r0 = System.nanoTime()
-                val read = reader.read(out.soft, frames / 4, valid, plan.keepFrom(k), plan.keepUntil(k))
-                readerMs += (System.nanoTime() - r0) / 1e6
-                calls.readerWriteMs += read.writeMs
-                calls.readerRunMs += read.runMs
-                calls.readerReadMs += read.readMs
-                while (pending.size >= 2) pending.removeFirst().get() // bounded queue: at most 2 windows wait for decoding
-                pending.addLast(decode.submit { decodeWindow(k, read, out.soft) })
-                val done = plan.kept(k).last + 1
-                listener.onWindow(k, plan.count, done * Ctc.SECONDS_PER_TOKEN, (System.nanoTime() - t0) / 1e6)
+                val ex = readerExec
+                if (ex == null) {
+                    readWindow(k, out, frames, valid)
+                } else {
+                    // One window read and one waiting on the reader's thread: the encoder is at most two windows ahead.
+                    val w0 = System.nanoTime()
+                    while (reading.size >= 2) reading.removeFirst().get()
+                    encoderWaitMs += (System.nanoTime() - w0) / 1e6
+                    val v = valid
+                    reading.addLast(ex.submit { readWindow(k, out, frames, v) })
+                }
             }
+            while (reading.isNotEmpty()) reading.removeFirst().get()
+            // Every window is read: the reader's thread added its last decodes before its last future completed.
             while (pending.isNotEmpty()) pending.removeFirst().get()
         } catch (t: Throwable) {
             next.cancel(true)
+            // The reader's thread finishes the window it is in (a graph run cannot be interrupted) before the decodes
+            // are cancelled: then no window of this run is still on it when the caller goes on.
+            for (f in reading) f.cancel(false)
+            for (f in reading) runCatching { f.get() }
             for (f in pending) f.cancel(true)
-            throw t
+            throw (t as? ExecutionException)?.cause ?: t
         }
         dump?.soft?.flush()
         dump?.tokens?.flush()
         val elapsed = (System.nanoTime() - t0) / 1e6
-        return Result(plan, words, encoderMs, readerMs, usedFrames, melNs / 1e6, decodeNs / 1e6, elapsed, cancelled, blanks, warnings, calls)
+        return Result(plan, words, encoderMs, readerMs, usedFrames, melNs / 1e6, decodeNs / 1e6, elapsed, cancelled, blanks, warnings, calls, readerExec != null, encoderWaitMs)
     }
 
     companion object {

@@ -17,7 +17,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * [1, T] (the blank's score). A graph exported with the table in K slices gives `ids` / `best` as [1, T, K], one argmax
  * per slice of vocab / K words; the slice with the largest score wins (the lowest slice on a tie = the lowest word, as
  * torch's argmax). A token is blank when its blank score is above its best word's (the release's greedy rule).
- * Runs on the LiteRT thread, on the accelerator the encoder uses (the NPU's encoder gets a GPU fp32 reader).
+ * Runs on the LiteRT thread, on the accelerator the encoder uses (the NPU's encoder gets a GPU fp32 reader); next to an
+ * encoder on the NPU it is compiled, run and closed on the reader's own thread instead ([ownThread], [LiteRt.on]).
  */
 class TfliteReader private constructor(
     val file: File,
@@ -38,6 +39,8 @@ class TfliteReader private constructor(
     val threads: Int,
     /** The GPU precision asked for ([ReaderPrecision.id]), or "default" / "cpu". */
     val precision: String,
+    /** True: the graph belongs to the reader's own thread (compiled, run and closed there), false: to the LiteRT thread. */
+    val ownThread: Boolean = false,
 ) : Reader {
     override val name: String = file.name
     override val isStub = false
@@ -83,7 +86,7 @@ class TfliteReader private constructor(
         return best.all { it.isFinite() } && blank.all { it.isFinite() } && word.all { it in 0 until vocabSize }
     }
 
-    /** Idempotent. Call it on the LiteRT thread, after the last [read]. */
+    /** Idempotent. Call it on the thread that owns the graph ([ownThread]), after the last [read]. */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         listOf(softBuf, maskBuf, idsBuf, bestBuf, blankBuf).forEach { runCatching { it.close() } }
@@ -104,10 +107,11 @@ class TfliteReader private constructor(
         /**
          * Compiles [file] for [backend] (LiteRT thread) and checks its signature: inputs soft [1, T, 512] + mask [1, T],
          * outputs ids [1, T(, K)] int32 + best [1, T(, K)] + blank [1, T]; then one warm-up run. On GPU fp32 (and for
-         * the NPU's encoder) [precision] picks fp32 or fp16 arithmetic with fp32 accumulation. Throws [EncoderException]
+         * the NPU's encoder) [precision] picks fp32 or fp16 arithmetic with fp32 accumulation. [ownThread]: compile it on
+         * the reader's own thread (and run and close it there), else on the LiteRT thread. Throws [EncoderException]
          * with the screen's sentence.
          */
-        fun open(context: Context, file: File, backend: Backend, vocabSize: Int, cpuThreads: Int, precision: ReaderPrecision = ReaderPrecision.FP32): TfliteReader = LiteRt.call {
+        fun open(context: Context, file: File, backend: Backend, vocabSize: Int, cpuThreads: Int, precision: ReaderPrecision = ReaderPrecision.FP32, ownThread: Boolean = false): TfliteReader = LiteRt.on(ownThread) {
             val sig = SIGNATURES[file.name] ?: throw EncoderException("not_a_reader", "${file.name} is not a reader file name (reader_w30.tflite or reader_w10.tflite).")
             val env = LiteRt.environment(context)
             val gpuPrecision = if (precision == ReaderPrecision.FP16_ACC32) CompiledModel.GpuOptions.Precision.FP16_WITH_FP32_ACCUM else CompiledModel.GpuOptions.Precision.FP32
@@ -121,7 +125,7 @@ class TfliteReader private constructor(
                 Backend.GPU_DEFAULT -> "default"
                 else -> precision.id
             }
-            Log.i(Engine.TAG, "STEP reader_compile backend=${backend.id} precision=$precisionId path=${file.absolutePath}")
+            Log.i(Engine.TAG, "STEP reader_compile backend=${backend.id} precision=$precisionId thread=${Thread.currentThread().name} path=${file.absolutePath}")
             val t = System.nanoTime()
             val model = try {
                 CompiledModel.create(file.absolutePath, options, env)
@@ -146,7 +150,7 @@ class TfliteReader private constructor(
                 )
                 listOf("soft", "mask").forEach { bufs += model.createInputBuffer(it, sig) }
                 listOf("ids", "best", "blank").forEach { bufs += model.createOutputBuffer(it, sig) }
-                TfliteReader(file, backend, model, sig, bufs[0], bufs[1], bufs[2], bufs[3], bufs[4], tokens, slices, vocabSize, compileMs, cpuThreads, precisionId)
+                TfliteReader(file, backend, model, sig, bufs[0], bufs[1], bufs[2], bufs[3], bufs[4], tokens, slices, vocabSize, compileMs, cpuThreads, precisionId, ownThread)
             } catch (e: Throwable) {
                 bufs.forEach { runCatching { it.close() } }
                 runCatching { model.close() }

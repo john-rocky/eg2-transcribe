@@ -71,7 +71,7 @@ object Jobs {
         val choice = modelChoice(context)
         Session.modelLine = choice.describe()
         val have = Engine.isLoaded(choice, Session.backend, frames)
-        if (have != null && Engine.isReaderLoaded(context, have.encoder.backend, windowFor(have, frames), Session.readerPrecision)) return true
+        if (have != null && Engine.isReaderLoaded(context, have.encoder.backend, windowFor(have, frames), Session.readerPrecision, Engine.readerOwnThread(have.encoder.backend, Session.serialReader))) return true
         Session.loading = true
         Session.loadingSince = System.nanoTime()
         Session.pill = "LOADING MODEL"
@@ -95,7 +95,7 @@ object Jobs {
                 Log.i(TAG, "ENGINE_READY requested=${l.requested.id} used=${e.backend.id} compile_ms=${fmt(e.compileMs)} warmup_ms=${e.warmupMs} model=${e.file.name} bytes=${l.stamp.bytes} sha256=${l.stamp.sha256} sha256_ms=${l.stamp.sha256Ms?.let { fmt(it) }} fallback=${l.fallback != null}" +
                     (npu?.let { " npu_dispatch=${it.dispatch} npu_cached_before=${it.prepared?.cachedBefore} npu_cache_bytes=${it.cacheBytesAfter} npu_error=${it.error}" } ?: ""))
             }
-            val rs = Engine.ensureReader(context, l.encoder.backend, windowFor(l, frames), Session.readerPrecision) { stage ->
+            val rs = Engine.ensureReader(context, l.encoder.backend, windowFor(l, frames), Session.readerPrecision, Engine.readerOwnThread(l.encoder.backend, Session.serialReader)) { stage ->
                 Session.status = stage
                 Session.changed()
             }
@@ -162,6 +162,7 @@ object Jobs {
      */
     private fun decodeFile(context: Context, uri: Uri, label: String, cancel: AtomicBoolean, mode: AudioDecoder.Mode = Session.decodeMode, capMs: Long? = null): Pair<Session.Input?, Outcome?> {
         Session.lastInput = null // input.pcm is about to be overwritten
+        Session.resultLine = null
         Session.decoding = true
         Session.pill = "READING FILE"
         Session.tone = Session.Tone.WORK
@@ -272,6 +273,37 @@ object Jobs {
     }
 
     /**
+     * The recording harness's start (launch extra `load_only` with `file`): reads [uri] as the input and loads the
+     * models its length picks, then stops at READY with the file on the input line; Again transcribes it. With
+     * [Request.report] the report of the load is written (status "ready").
+     */
+    fun loadInput(context: Context, uri: Uri, label: String, req: Request, cancel: AtomicBoolean) {
+        val (input, failed) = decodeFile(context, uri, label, cancel)
+        if (input == null) {
+            val o = failed!!
+            finish(context, req, o.status, o.pill, o.text, input = o.input)
+            return
+        }
+        val samples = input.json.optLong("samples")
+        Session.lastInput = input
+        Session.inputLine = inputLine(input, samples / 16000.0)
+        Session.progress = 0.0
+        val pick = pickWindow(context, WindowPlan.tokensFor(MelFrontEnd.frames(samples)))
+        if (!loadModel(context, pick.frames)) {
+            val e = lastLoadError
+            finish(context, req, e?.code ?: "load_failed", Session.pill, Session.status, input = input.json, keepScreen = true)
+            return
+        }
+        Log.i(TAG, "READY_INPUT label=$label samples=$samples frames=${pick.frames} reason=${pick.reason}")
+        finish(context, req, "ready", "READY", "Ready. Again transcribes $label.", input = input.json, tone = Session.Tone.IDLE)
+    }
+
+    /** The input line: the input's name, its length and its format. */
+    private fun inputLine(input: Session.Input, seconds: Double): String =
+        "${input.label} · ${Session.clock(seconds)}" + (input.json.optString("format").takeIf { it.isNotEmpty() }?.let { " · $it" } ?: "") +
+            (if (input.json.optBoolean("resampled")) " (resampled to 16 kHz)" else "")
+
+    /**
      * Every audio file of [dir], with the same model: one report with an item per file, by name (its status,
      * transcript, timing; per-file dumps `<report stem>.<file stem>.tokens.bin` / `.soft.f32` with [Request.dump]).
      * The device check's fixture mode (the 20 test-clean utterances in one run). With "auto" a file may need the other
@@ -355,6 +387,7 @@ object Jobs {
         }
         Session.statusOpensSettings = false
         Session.lastInput = null // mic.pcm is about to be overwritten
+        Session.resultLine = null
         Session.recording = true
         Session.pill = "RECORDING"
         Session.tone = Session.Tone.LIVE
@@ -387,21 +420,33 @@ object Jobs {
         run(context, input, req)
     }
 
-    /** How a transcription ended: what [finish] shows and reports. */
+    /** How a transcription ended: what [finish] shows and reports; [result] = the screen's result lines ([resultLines]). */
     private class Outcome(
         val status: String, val pill: String, val text: String, val input: JSONObject? = null, val extra: JSONObject? = null,
         val tone: Session.Tone = Session.Tone.LIVE, val keepScreen: Boolean = false, val loaded: Engine.Loaded? = null,
+        val result: Pair<String, String>? = null,
     )
 
-    /** Checks length and loudness, loads the model, runs the pipeline and reports. */
+    /**
+     * The screen's result after a transcription that ended "ok", from the numbers of its run report
+     * (`timing.transcribe_ms`, `timing.xrt`): "Read 54:17 of audio in 55.2 s" and "59× real time · encoder on NPU,
+     * reader on GPU fp32". [reader] = the reader's accelerator, null for the stub.
+     */
+    fun resultLines(audioSeconds: Double, transcribeMs: Double, xrt: Double, encoder: String, reader: String?): Pair<String, String> =
+        "Read ${Session.clock(audioSeconds)} of audio in ${secs(transcribeMs)}" to
+            "${String.format(Locale.US, "%.0f", xrt)}× real time · encoder on $encoder, " + (reader?.let { "reader on $it" } ?: "stub reader")
+
+    /** Checks length and loudness, loads the model, runs the pipeline and reports; the result lines when it ends "ok". */
     private fun run(context: Context, input: Session.Input, req: Request) {
         val o = transcribeOnce(context, input, req.dump, req.report?.removeSuffix(".json"))
+        Session.resultLine = if (o.status == "ok") o.result else null
         finish(context, req, o.status, o.pill, o.text, input = input.json, loaded = o.loaded, extra = o.extra, tone = o.tone, keepScreen = o.keepScreen)
     }
 
     /** One transcription of [input]; [dumpStem] = the per-token files' name without extension (with [dump]). */
     private fun transcribeOnce(context: Context, input: Session.Input, dump: Boolean, dumpStem: String?): Outcome {
         Session.lastInput = input
+        Session.resultLine = null
         Session.progress = 0.0
         Session.progressLine = ""
         Session.detailLine = ""
@@ -412,8 +457,7 @@ object Jobs {
             val seconds = src.seconds
             val rms = Loudness.rms(src)
             input.json.put("rms", rms)
-            Session.inputLine = "${input.label} · ${Session.clock(seconds)}" + (input.json.optString("format").takeIf { it.isNotEmpty() }?.let { " · $it" } ?: "") +
-                (if (input.json.optBoolean("resampled")) " (resampled to 16 kHz)" else "")
+            Session.inputLine = inputLine(input, seconds)
             if (seconds < Engine.MIN_SECONDS) {
                 return Outcome("too_short", "TOO SHORT", "The audio is ${"%.1f".format(Locale.US, seconds)} s long; at least ${Engine.MIN_SECONDS.toInt()} s is needed.", input.json)
             }
@@ -478,6 +522,7 @@ object Jobs {
             Session.detailLine = (if (r.plan.count == 1) "1 window of ${windowFrames / 100} s" else "${r.plan.count} windows of ${windowFrames / 100} s (overlap $overlap tokens)") +
                 (if (pick.setting == "auto") " (auto: ${pick.reason})" else "") +
                 " · encoder median ${fmt(median)} ms (${split("encoder")}), reader median ${fmt(readerMedian)} ms (${split("reader")}) a window · " +
+                (if (r.readerOverlap) "the reader read each window while the encoder ran the next (the encoder waited ${secs(r.encoderWaitMs.sum())} for it) · " else "") +
                 "log-mel ${secs(r.melMs)} · labels ${secs(r.decodeMs)} · ${r.plan.tokens} tokens · ${r.words.size} words" +
                 (if (decodeMs > 0) " · file read ${secs(decodeMs)}" + readPath(input.json) else "")
             val text = r.words.joinToString(" ") { it.text }
@@ -486,6 +531,8 @@ object Jobs {
             val line = if (r.cancelled) "Stopped after ${r.encoderMs.size} of ${r.plan.count} windows." else
                 "${Session.clock(seconds)} of audio in ${secs(r.elapsedMs)} (${"%.1f".format(Locale.US, xrt)}× real time) on ${loaded.encoder.backend.label}."
             val tr = readers.tflite
+            val shown = resultLines(seconds, r.elapsedMs, xrt, loaded.encoder.backend.label,
+                tr?.let { it.backend.label + if (it.precision == ReaderPrecision.FP16_ACC32.id) " (fp16, fp32 accumulation)" else "" })
             val report = jsonOf(
                 "window" to jsonOf(
                     "frames" to windowFrames, "seconds" to windowFrames / 100, "overlap_tokens" to overlap, "overlap_s" to overlap * 0.04,
@@ -499,20 +546,23 @@ object Jobs {
                     "reader_ms" to jsonArray(r.readerMs), "reader_ms_median" to readerMedian,
                     "mel_ms" to r.melMs, "labels_ms" to r.decodeMs, "file_read_ms" to decodeMs,
                     // Per window: each call's input write / run / output read (encoder_ms = the three; reader_ms = the
-                    // reader's three on the LiteRT thread).
+                    // reader's three on the thread its graph runs on).
                     "calls" to JSONObject().apply { for ((k, v) in r.calls.all()) put(k, jsonArray(v)) },
                     "call_medians" to JSONObject().apply { for ((k, v) in callMedians) put(k, v) },
+                    // The reader on its own thread, a window behind the encoder; per window, the encoder's wait to hand it over.
+                    "reader_overlap" to r.readerOverlap, "encoder_wait_ms" to jsonArray(r.encoderWaitMs), "encoder_wait_ms_total" to r.encoderWaitMs.sum(),
                 ),
                 "encoder_run" to jsonOf("file" to loaded.encoder.file.name, "bytes" to loaded.stamp.bytes, "sha256" to loaded.stamp.sha256,
                     "used" to loaded.encoder.backend.id, "compile_ms" to loaded.encoder.compileMs, "signatures" to jsonArray(loaded.encoder.signatureNames)),
                 "reader_run" to jsonOf("file" to (tr?.file?.name ?: readers.reader.name), "bytes" to readers.stamp?.bytes, "sha256" to readers.stamp?.sha256,
                     "stub" to readers.reader.isStub, "used" to tr?.backend?.id,
-                    "precision" to tr?.precision, "tokens" to tr?.tokens, "compile_ms" to tr?.compileMs, "fallback" to readers.fallback),
+                    "precision" to tr?.precision, "tokens" to tr?.tokens, "compile_ms" to tr?.compileMs, "fallback" to readers.fallback,
+                    "own_thread" to readers.ownThread),
                 "tokens" to r.plan.tokens, "blanks" to r.blanks, "words" to r.words.size, "transcript" to text,
                 "warnings" to jsonArray(r.warnings),
                 "dump" to if (dumpSoft != null) jsonOf("soft" to dumpSoft.name, "tokens" to dumpTokens?.name, "token_record" to Pipeline.TOKEN_RECORD) else null,
             )
-            return Outcome(status, pill, line, input.json, report, if (r.cancelled) Session.Tone.WARN else Session.Tone.OK, loaded = loaded)
+            return Outcome(status, pill, line, input.json, report, if (r.cancelled) Session.Tone.WARN else Session.Tone.OK, loaded = loaded, result = shown)
         }
     }
 
@@ -571,6 +621,7 @@ object Jobs {
                     "fallback" to rs.fallback, "tokens" to t?.tokens, "slices" to t?.slices, "compile_ms" to t?.compileMs,
                     "warmup_ms" to t?.warmupMs, "threads" to t?.threads, "window_frames" to rs.windowFrames, "precision" to t?.precision,
                     "files" to jsonArray(rs.key.map { (n, b) -> jsonOf("name" to n, "bytes" to b) }),
+                    "own_thread" to rs.ownThread, "serial_reader" to Session.serialReader,
                 )
             },
             "memory" to Engine.memoryJson(),

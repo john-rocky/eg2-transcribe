@@ -19,11 +19,19 @@ object Session {
     @Volatile var overlapTokens = WindowPlan.DEFAULT_OVERLAP
     @Volatile var minRms = Engine.MIN_RMS
 
-    /** Hidden settings (launch extras only): the reader's GPU precision, and how a compressed file is decoded. */
+    /**
+     * Hidden settings (launch extras only): the reader's GPU precision, how a compressed file is decoded, and
+     * [serialReader]: the reader of an encoder on the NPU on the LiteRT thread, after the encoder, as on the CPU and
+     * the GPU (default false: on its own thread, a window behind the encoder, [Engine.readerOwnThread]).
+     */
     @Volatile var readerPrecision = ReaderPrecision.FP32
     @Volatile var decodeMode = AudioDecoder.Mode.FLAC
+    @Volatile var serialReader = false
 
-    /** The recording harness (launch extras): the file picker's first folder, and a report for a file picked by hand. */
+    /**
+     * The recording harness (launch extras): the file picker's first folder, and a report for a run started by hand
+     * (a picked file, the example, Again).
+     */
     @Volatile var pickerDir: String? = null
     @Volatile var pickerReport: String? = null
 
@@ -40,6 +48,9 @@ object Session {
     @Volatile var inputLine = ""
     @Volatile var progressLine = ""
     @Volatile var progress = 0.0
+
+    /** After a transcription that ended "ok": the result's two lines ([Jobs.resultLines]); null otherwise. */
+    @Volatile var resultLine: Pair<String, String>? = null
     @Volatile var detailLine = ""
     @Volatile var note: String? = null
     @Volatile var loading = false

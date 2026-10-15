@@ -58,13 +58,18 @@ import org.json.JSONObject
  * the default; the NPU always runs 10 s windows), --ei overlap <tokens>, --ef min_rms <rms>. Measurements only, not on
  * the screen: --es reader_precision fp32|fp16acc32 (the reader on a GPU), --es decode_mode flac|sync|async|legacy (flac,
  * the default: FLAC files by the app's own reader, MediaCodec for the rest and as its fallback; the others send every
- * compressed file through MediaCodec), and --ez decode_only true with --es file: read the file, report where the time
- * went and stop (no model; --ei decode_cap_s <s> stops the read after that long).
+ * compressed file through MediaCodec), --ez serial_reader true (with the encoder on the NPU, the reader runs after the
+ * encoder on the LiteRT thread instead of beside it on its own thread), and --ez decode_only true with --es file: read
+ * the file, report where the time went and stop (no model; --ei decode_cap_s <s> stops the read after that long).
+ * The recording harness: --ez load_only true with --es file reads the file and loads the models, then waits at READY
+ * with the file as the input (a tap on Again transcribes it); --es picker_report <name.json> writes the report of a run
+ * started by hand (a picked file, the example, Again); --es picker_dir <folder> opens the file picker there;
+ * --ez keep_visible true shows over the lock screen without a job.
  * A start with file or mic_ms shows over the lock screen and keeps the display on (a phone asleep behind a lock keeps
  * the app on its slow cores).
  *
- * Log tag eg2transcribe: STEP, NPU_CACHE, ENGINE_READY, DELEGATE, FALLBACK, READER, INPUT, WINDOW, RESULT, RUN_JSON,
- * RUN_DONE, BUSY, MIC_PERMISSION, ROTATION, ERROR.
+ * Log tag eg2transcribe: STEP, NPU_CACHE, ENGINE_READY, DELEGATE, FALLBACK, READER, INPUT, READY_INPUT, WINDOW, RESULT,
+ * RUN_JSON, RUN_DONE, BUSY, MIC_PERMISSION, ROTATION, ERROR.
  */
 class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
@@ -91,6 +96,8 @@ class MainActivity : Activity() {
     private lateinit var inputLine: TextView
     private lateinit var progressBar: ProgressBar
     private lateinit var progressLine: TextView
+    private lateinit var resultMain: TextView
+    private lateinit var resultSub: TextView
     private lateinit var scroll: ScrollView
     private lateinit var transcript: TextView
     private lateinit var detailLine: TextView
@@ -211,6 +218,7 @@ class MainActivity : Activity() {
         if (i.hasExtra("min_rms")) Session.minRms = i.getFloatExtra("min_rms", Engine.MIN_RMS.toFloat()).toDouble()
         ReaderPrecision.parse(i.getStringExtra("reader_precision"))?.let { Session.readerPrecision = it }
         AudioDecoder.Mode.parse(i.getStringExtra("decode_mode"))?.let { Session.decodeMode = it }
+        if (i.hasExtra("serial_reader")) Session.serialReader = i.getBooleanExtra("serial_reader", false)
         i.getStringExtra("picker_dir")?.let { Session.pickerDir = it }
         i.getStringExtra("picker_report")?.let { Session.pickerReport = it }
         // The recording harness without a job: show over the lock screen and keep the display on, as a check's start does.
@@ -225,12 +233,14 @@ class MainActivity : Activity() {
         recordMode()
         val req = Jobs.Request(i.getStringExtra("report"), i.getBooleanExtra("dump", false))
         val decodeOnly = i.getBooleanExtra("decode_only", false)
+        val loadOnly = i.getBooleanExtra("load_only", false)
         val capMs = if (i.hasExtra("decode_cap_s")) i.getIntExtra("decode_cap_s", 0) * 1000L else null
         // A start that is handled once: a later onNewIntent or a recreated activity does not run it again.
         i.removeExtra("file")
         i.removeExtra("dir")
         i.removeExtra("mic_ms")
         i.removeExtra("decode_only")
+        i.removeExtra("load_only")
         if (isRunning) {
             Log.i(TAG, "BUSY ignored a start (report=${req.report}): one transcription at a time")
             req.report?.let { name ->
@@ -251,6 +261,7 @@ class MainActivity : Activity() {
             val f = if (file.startsWith("/")) File(file) else File(Engine.filesDir(this), file)
             stopDecode.set(false)
             if (decodeOnly) submit(true) { Jobs.decodeOnly(applicationContext, Uri.fromFile(f), f.name, req, stopDecode, Session.decodeMode, capMs) }
+            else if (loadOnly) submit(true) { Jobs.loadInput(applicationContext, Uri.fromFile(f), f.name, req, stopDecode) }
             else submit(true) { Jobs.transcribeUri(applicationContext, Uri.fromFile(f), f.name, req, stopDecode) }
         } else {
             stopMic.set(false)
@@ -506,23 +517,34 @@ class MainActivity : Activity() {
     }
 
     private fun buildUi(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-        }
         val pad = dp(16f)
-        root.addView(label(22f, bold = true).apply { text = "Eg2 Transcribe" })
-        root.addView(label(13f, C_SUB).apply {
+        // The top stays on the screen while the transcript scrolls: the app's name and the phone, the state, the
+        // progress line ("Window k of N", the time since the start, the speed) and, after a run, its result.
+        val top = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        top.addView(label(22f, bold = true).apply { text = "Eg2 Transcribe" })
+        top.addView(label(13f, C_SUB).apply {
             text = "${Build.MANUFACTURER.replaceFirstChar { it.titlecase(Locale.US) }} ${Build.MODEL} · LiteRT ${BuildConfig.LITERT_VERSION} · audio stays on this phone"
         })
         pill = label(13f, Color.WHITE, bold = true).apply {
             setPadding(dp(10f), dp(3f), dp(10f), dp(3f))
             letterSpacing = 0.05f
         }
-        root.addView(LinearLayout(this).apply {
+        top.addView(LinearLayout(this).apply {
             setPadding(0, dp(8f), 0, dp(4f))
             addView(pill)
         })
+        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000 }
+        top.addView(progressBar)
+        progressLine = label(20f, C_TEXT, bold = true)
+        top.addView(progressLine)
+        resultMain = label(28f, C_TEXT, bold = true).apply { setPadding(0, dp(4f), 0, 0) }
+        top.addView(resultMain)
+        resultSub = label(16f, C_TEXT).apply { setPadding(0, 0, 0, dp(4f)) }
+        top.addView(resultSub)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4f), 0, dp(8f))
+        }
         status = label(15f).apply {
             setPadding(0, 0, 0, dp(6f))
             setOnClickListener {
@@ -554,7 +576,7 @@ class MainActivity : Activity() {
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         recordButton = button("● Record") { onRecord() }
         openButton = button("Open audio file") { onOpenFile() }
-        againButton = button("Again") { if (!isBusy) submit(true) { Jobs.transcribeAgain(applicationContext, Jobs.Request(null, false)) } }
+        againButton = button("Again") { if (!isBusy) submit(true) { Jobs.transcribeAgain(applicationContext, Jobs.Request(Session.pickerReport, false)) } }
         stopButton = button("Stop") { onStopTapped() }
         for (b in listOf(recordButton, openButton, againButton, stopButton)) actions.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(actions)
@@ -562,10 +584,6 @@ class MainActivity : Activity() {
         root.addView(row("Example", label(14f).apply { text = Examples.LABEL }, exampleButton))
         inputLine = label(13f, C_SUB)
         root.addView(inputLine)
-        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000 }
-        root.addView(progressBar)
-        progressLine = label(14f, C_TEXT, bold = true)
-        root.addView(progressLine)
         detailLine = label(12f, C_SUB)
         root.addView(detailLine)
         transcript = label(15f).apply {
@@ -574,25 +592,30 @@ class MainActivity : Activity() {
             setPadding(0, dp(6f), 0, dp(6f))
         }
         root.addView(transcript)
-        // One scroll for the whole screen, so the controls and the transcript fit any window shape (landscape, split
-        // screen); the system bars and the cutout are kept clear on every side (landscape puts the navigation bar on one).
+        // One scroll for the controls and the transcript under the fixed top, so they fit any window shape (landscape,
+        // split screen); the system bars and the cutout are kept clear on every side (landscape puts the navigation bar
+        // on one).
         scroll = ScrollView(this).apply {
             setBackgroundColor(Color.WHITE)
             isFillViewport = true
-            clipToPadding = false
             addView(root)
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            addView(top)
+            addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             setOnApplyWindowInsetsListener { v, insets ->
                 if (Build.VERSION.SDK_INT >= 30) {
                     val b = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-                    v.setPadding(b.left + pad, b.top + dp(8f), b.right + pad, b.bottom + dp(8f))
+                    v.setPadding(b.left + pad, b.top + dp(8f), b.right + pad, b.bottom)
                 } else {
                     @Suppress("DEPRECATION")
-                    v.setPadding(insets.systemWindowInsetLeft + pad, insets.systemWindowInsetTop + dp(8f), insets.systemWindowInsetRight + pad, insets.systemWindowInsetBottom + dp(8f))
+                    v.setPadding(insets.systemWindowInsetLeft + pad, insets.systemWindowInsetTop + dp(8f), insets.systemWindowInsetRight + pad, insets.systemWindowInsetBottom)
                 }
                 insets
             }
         }
-        return scroll
     }
 
     private var tickPending = false
@@ -666,6 +689,12 @@ class MainActivity : Activity() {
         inputLine.text = Session.inputLine
         progressBar.progress = (Session.progress * 1000).toInt()
         progressLine.text = Session.progressLine
+        progressLine.visibility = if (Session.progressLine.isEmpty()) View.GONE else View.VISIBLE
+        val result = Session.resultLine
+        resultMain.text = result?.first ?: ""
+        resultSub.text = result?.second ?: ""
+        resultMain.visibility = if (result == null) View.GONE else View.VISIBLE
+        resultSub.visibility = resultMain.visibility
         detailLine.text = Session.detailLine
         if (busy || Session.recordMode) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

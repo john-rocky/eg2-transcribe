@@ -91,6 +91,8 @@ object Engine {
         val precision: ReaderPrecision = ReaderPrecision.FP32,
         /** The reader file with its size and SHA-256, read in this load; null for the stub. */
         val stamp: FileStamp? = null,
+        /** True: the reader's graph lives on the reader's own thread and reads window k while the encoder runs k + 1. */
+        val ownThread: Boolean = false,
     ) {
         val tflite: TfliteReader? get() = reader as? TfliteReader
     }
@@ -113,19 +115,28 @@ object Engine {
     fun readerBackend(encoder: Backend): Backend = if (encoder == Backend.NPU) Backend.GPU_FP32 else encoder
 
     /**
-     * The trained reader of files/reader/ for windows of [windowFrames] frames, compiled for [backend] (a GPU -> the
-     * CPU when it cannot compile or run it), or the stub with the reason in [ReaderSet.note] when the files are not
-     * all there or cannot be used. Kept while the files, the accelerator and the window length stay the same.
+     * Whether the reader gets its own thread for an encoder on [encoder]: on the NPU, unless [serial] (launch extra
+     * `serial_reader`). Then window k's reader runs on the GPU while the encoder runs window k + 1 on the NPU; on the
+     * CPU and the GPU the encoder and the reader share the hardware, and both run on the LiteRT thread, one after the
+     * other.
      */
-    fun ensureReader(context: Context, backend: Backend, windowFrames: Int, precision: ReaderPrecision = ReaderPrecision.FP32, onStage: (String) -> Unit = {}): ReaderSet {
+    fun readerOwnThread(encoder: Backend, serial: Boolean): Boolean = encoder == Backend.NPU && !serial
+
+    /**
+     * The trained reader of files/reader/ for windows of [windowFrames] frames, compiled for [backend] (a GPU -> the
+     * CPU when it cannot compile or run it) on the reader's own thread when [ownThread], or the stub with the reason in
+     * [ReaderSet.note] when the files are not all there or cannot be used. Kept while the files, the accelerator, the
+     * window length and the thread stay the same.
+     */
+    fun ensureReader(context: Context, backend: Backend, windowFrames: Int, precision: ReaderPrecision = ReaderPrecision.FP32, ownThread: Boolean = false, onStage: (String) -> Unit = {}): ReaderSet {
         val dir = readerDir(context)
         val key = readerKey(dir)
-        readers?.takeIf { current(it, key, backend, windowFrames, precision) }?.let { return it }
+        readers?.takeIf { current(it, key, backend, windowFrames, precision, ownThread) }?.let { return it }
         closeReader()
-        return loadReader(context, dir, key, backend, windowFrames, precision, onStage).also { readers = it }
+        return loadReader(context, dir, key, backend, windowFrames, precision, ownThread, onStage).also { readers = it }
     }
 
-    private fun loadReader(context: Context, dir: File, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int, precision: ReaderPrecision, onStage: (String) -> Unit): ReaderSet {
+    private fun loadReader(context: Context, dir: File, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int, precision: ReaderPrecision, ownThread: Boolean, onStage: (String) -> Unit): ReaderSet {
         val vocabFile = File(dir, "vocab.txt")
         val file = TfliteReader.fileFor(dir, windowFrames)
         var why = "no trained reader in files/reader/"
@@ -141,18 +152,18 @@ object Engine {
                     val want = readerBackend(backend)
                     onStage("Compiling the reader for ${want.label}…")
                     val r = try {
-                        TfliteReader.open(context, file!!, want, vocab.size, CPU_THREADS, precision)
+                        TfliteReader.open(context, file!!, want, vocab.size, CPU_THREADS, precision, ownThread)
                     } catch (e: EncoderException) {
                         if (!want.isGpu || e.code !in setOf("compile_failed", "run_failed", "not_finite")) throw e
                         fallback = "${e.text}. The reader runs on the CPU instead."
                         Log.w(TAG, "FALLBACK reader ${want.id} -> cpu: ${e.text}", e.cause)
                         onStage("Compiling the reader for the CPU…")
-                        TfliteReader.open(context, file!!, Backend.CPU, vocab.size, CPU_THREADS)
+                        TfliteReader.open(context, file!!, Backend.CPU, vocab.size, CPU_THREADS, ownThread = ownThread)
                     }
                     onStage("Reading ${r.file.name} for its SHA-256…")
                     val stamp = FileStamp.of(r.file)
-                    Log.i(TAG, "READER file=${r.file.name} bytes=${stamp.bytes} sha256=${stamp.sha256} sha256_ms=${stamp.sha256Ms?.let { Jobs.fmt(it) }} backend=${r.backend.id} precision=${r.precision} tokens=${r.tokens} slices=${r.slices} words=${vocab.size} compile_ms=${Jobs.fmt(r.compileMs)} warmup_ms=${Jobs.fmt(r.warmupMs)} fallback=${fallback != null}")
-                    return ReaderSet(r, vocab, readerNote(r.backend, r.precision, stamp, vocab.size), want, fallback, windowFrames, key, precision, stamp)
+                    Log.i(TAG, "READER file=${r.file.name} bytes=${stamp.bytes} sha256=${stamp.sha256} sha256_ms=${stamp.sha256Ms?.let { Jobs.fmt(it) }} backend=${r.backend.id} precision=${r.precision} tokens=${r.tokens} slices=${r.slices} words=${vocab.size} compile_ms=${Jobs.fmt(r.compileMs)} warmup_ms=${Jobs.fmt(r.warmupMs)} fallback=${fallback != null} own_thread=${r.ownThread}")
+                    return ReaderSet(r, vocab, readerNote(r.backend, r.precision, stamp, vocab.size), want, fallback, windowFrames, key, precision, stamp, r.ownThread)
                 } catch (e: Throwable) {
                     why = "files/reader/ could not be used: ${e.message}"
                     Log.w(TAG, "READER_FALLBACK $why", e)
@@ -177,13 +188,17 @@ object Engine {
         "Encoder on ${backend.label}" + (if (backend == Backend.CPU) " ($threads threads)" else "") +
             " · ${stamp.label} · " + (if (signatures.size == 1) "signature " else "signatures ") + signatures.joinToString(", ")
 
-    /** The same files, accelerator, window length and precision: a reader (or a stub after a failed load) is not loaded again. */
-    private fun current(r: ReaderSet, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int, precision: ReaderPrecision): Boolean =
-        r.key == key && r.requested == readerBackend(backend) && r.windowFrames == windowFrames && r.precision == precision
+    /**
+     * The same files, accelerator, window length, precision and thread: a reader (or a stub after a failed load) is not
+     * loaded again. A stub has no thread of its own: it stands for either.
+     */
+    private fun current(r: ReaderSet, key: List<Pair<String, Long>>, backend: Backend, windowFrames: Int, precision: ReaderPrecision, ownThread: Boolean): Boolean =
+        r.key == key && r.requested == readerBackend(backend) && r.windowFrames == windowFrames && r.precision == precision &&
+            (r.tflite == null || r.ownThread == ownThread)
 
     /** True when [ensureReader] would return the loaded reader without work. */
-    fun isReaderLoaded(context: Context, backend: Backend, windowFrames: Int, precision: ReaderPrecision = ReaderPrecision.FP32): Boolean =
-        readers?.let { current(it, readerKey(readerDir(context)), backend, windowFrames, precision) } ?: false
+    fun isReaderLoaded(context: Context, backend: Backend, windowFrames: Int, precision: ReaderPrecision = ReaderPrecision.FP32, ownThread: Boolean = false): Boolean =
+        readers?.let { current(it, readerKey(readerDir(context)), backend, windowFrames, precision, ownThread) } ?: false
 
     /** True when files/reader/ has the reader file of that window length itself (not a longer one that pads). */
     fun hasReaderFile(context: Context, windowFrames: Int): Boolean = TfliteReader.FILES[windowFrames]?.let { File(readerDir(context), it).isFile } ?: false
@@ -191,7 +206,7 @@ object Engine {
     fun closeReader() {
         val r = readers ?: return
         readers = null
-        LiteRt.call { r.reader.close() }
+        LiteRt.on(r.ownThread) { r.reader.close() }
     }
 
     /** The file [backend] runs for windows of [windowFrames] frames: the NPU only the 10 s file, the others the asked length first. */
@@ -316,10 +331,13 @@ object Engine {
         LiteRt.call { l.encoder.close() }
     }
 
-    /** Runs the pipeline on the LiteRT thread (the encoder and the reader's graph), the labels on the decode thread. */
+    /**
+     * Runs the pipeline on the LiteRT thread (the encoder, and the reader's graph unless it has its own thread: then
+     * window k's reader runs there while the encoder runs window k + 1), the labels on the decode thread.
+     */
     fun transcribe(pcm: PcmSource, loaded: Loaded, readers: ReaderSet, windowFrames: Int, overlapTokens: Int, listener: Pipeline.Listener, dump: Pipeline.Dump?): Pipeline.Result {
         cancel.set(false)
-        val pipeline = Pipeline(loaded.encoder, readers.reader, readers.vocab, prep, decode)
+        val pipeline = Pipeline(loaded.encoder, readers.reader, readers.vocab, prep, decode, if (readers.ownThread) LiteRt.readerExecutor else null)
         return LiteRt.call { pipeline.run(pcm, windowFrames, overlapTokens, listener, { cancel.get() }, dump) }
     }
 

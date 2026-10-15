@@ -114,4 +114,19 @@ class ModelFilesTest {
         assertNull(gone.sha256)
         assertNull(gone.sha256Ms)
     }
+
+    @Test
+    fun theResultLinesSayTheLengthTheTimeTheSpeedAndTheAccelerators() {
+        // The 54-minute fixture (52,119,092 samples) and the bundled example (8.1 s), with the run report's numbers.
+        assertEquals(
+            "Read 54:17 of audio in 55.2 s" to "59× real time · encoder on NPU, reader on GPU fp32",
+            Jobs.resultLines(52_119_092 / 16000.0, 55_234.5, 58.97, "NPU", "GPU fp32"),
+        )
+        assertEquals(
+            "Read 00:08 of audio in 0.26 s" to "31× real time · encoder on GPU fp32, reader on GPU fp32",
+            Jobs.resultLines(8.12, 258.4, 31.42, "GPU fp32", "GPU fp32"),
+        )
+        assertEquals("16× real time · encoder on CPU, stub reader", Jobs.resultLines(30.0, 1875.0, 16.0, "CPU", null).second)
+        assertEquals("Read 1:02:03 of audio in 61.0 s", Jobs.resultLines(3723.0, 61_000.0, 61.0, "NPU", "GPU fp32").first)
+    }
 }
