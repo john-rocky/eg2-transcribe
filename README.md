@@ -74,8 +74,8 @@ a stream of 30 s windows at 30.96 ms per window on the M4 Max with two windows i
 | Mac (M4 Max), macOS 27.0 | the app on the 54-minute recording, its default: encoder on the GPU, reader v2 on the Neural Engine, two windows in flight | 5.95 s (548× real time), WER 3.82 % |
 | iPhone 18 Pro, iOS 27.2 | the app on the 54-minute recording, its default: encoder and reader v2 on the GPU, one window at a time | 12.01 s (271× real time), WER 3.81 % |
 
-The Mac app with reader v1 on an 8.6 s LibriVox clip, from the file to its 27 words in 109 ms:
-[12-second screen recording](https://github.com/john-rocky/coreai-assets/blob/main/demos/eg2-transcribe-coreai-mac-20261014.mp4) (`demos/eg2-transcribe-coreai-mac-20261014.mp4` in coreai-assets).
+The Mac app with reader v2 on an 8.6 s LibriVox clip, from the file to its 27 words in 105 ms:
+[12-second screen recording](https://github.com/john-rocky/coreai-assets/blob/main/demos/eg2-transcribe-coreai-mac-20261015.mp4) (`demos/eg2-transcribe-coreai-mac-20261015.mp4` in coreai-assets; the recording with reader v1, 2026-10-14, is beside it).
 
 ## Android
 
