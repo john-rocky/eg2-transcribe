@@ -76,6 +76,8 @@ a stream of 30 s windows at 30.96 ms per window on the M4 Max with two windows i
 
 The Mac app with reader v2 on an 8.6 s LibriVox clip, from the file to its 27 words in 105 ms:
 [12-second screen recording](https://github.com/john-rocky/coreai-assets/blob/main/demos/eg2-transcribe-coreai-mac-20261015.mp4) (`demos/eg2-transcribe-coreai-mac-20261015.mp4` in coreai-assets; the recording with reader v1, 2026-10-14, is beside it).
+The iPhone 18 Pro app with reader v2 on a 3.1 s sentence of the same chapter, from the file to its 10 words in 156 ms:
+[12-second screen recording](https://github.com/john-rocky/coreai-assets/blob/main/demos/eg2-transcribe-coreai-iphone-20261016.mp4).
 
 ## Android
 
