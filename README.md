@@ -7,7 +7,7 @@ English speech-to-text apps for iPhone, Mac and Android that run on the device, 
 A 3.1-second sentence in 156 ms, which the app shows as ×20. The app runs a full 30-second window even for a clip this short. <a href="https://github.com/john-rocky/coreai-assets/blob/main/demos/eg2-transcribe-coreai-iphone-20261016.mp4">Watch the video</a>.
 </p>
 
-Transcribing a 54-minute LibriVox recording of *The Adventure of the Speckled Band*:
+Transcribing a 54-minute LibriVox recording of *The Adventure of the Speckled Band*, measured on 2026-10-15:
 
 | Device | Runtime | Time | Times real time | Word error rate |
 |---|---|---|---|---|
@@ -15,9 +15,9 @@ Transcribing a 54-minute LibriVox recording of *The Adventure of the Speckled Ba
 | Galaxy S26 | LiteRT, GPU, debug build | 140.8 s | 23.1× | 3.81 % |
 | Pixel 8a | LiteRT, GPU, debug build | 300.8 s | 10.8× | 3.81 % |
 
-The iPhone time covers the model windows only. Reading the file and computing its features add about 0.7 s. The Android times include the features but not reading the file (2.8 s on the Galaxy and 5.4 s on the Pixel). The Mac app's numbers are in [Details](docs/details.md).
+The iPhone time covers only the encoder and reader runs. Reading the file and computing its features add about 0.7 s. The Android times include the features but not reading the file (2.8 s on the Galaxy and 5.4 s on the Pixel). The Mac app's numbers are in [Details](docs/details.md).
 
-On LibriSpeech, the word error rate is 4.21 % on test-clean and 10.42 % on test-other, with greedy decoding and no language model. The reader was trained only on read English audiobooks, and all of these tests are that kind of speech.
+On LibriSpeech, the reader's word error rate in PyTorch is 4.21 % on test-clean and 10.42 % on test-other, with greedy decoding and no language model. The reader was trained only on read English audiobooks, and all of these tests are that kind of speech.
 
 ## Try it on an iPhone or a Mac
 
@@ -44,7 +44,7 @@ Then download the five [model files](https://huggingface.co/mlboydaisuke/Embeddi
 
 ## Where the idea came from
 
-The idea comes from a post by Shahir (@TslShahir) and the *Embedding Gemma Transcribe* Mac app (eg2.haku.sh). I built this separately. This repository is not affiliated with Google.
+The idea comes from a post by Shahir (@TslShahir) and the *Embedding Gemma Transcribe* Mac app ([eg2.haku.sh](https://eg2.haku.sh)). I built this separately. This repository is not affiliated with Google.
 
 ## Documentation
 

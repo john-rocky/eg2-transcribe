@@ -5,7 +5,7 @@ The encoder stays frozen. A small trained *reader* maps each 40 ms audio token i
 text space, and the nearest English word is read out as the transcript.
 
 The idea comes from Shahir's post (@TslShahir, 2026-10-13) and the *Embedding Gemma Transcribe*
-Mac app (eg2.haku.sh). This repository is an independent
+Mac app ([eg2.haku.sh](https://eg2.haku.sh)). This repository is an independent
 reproduction for phones: Android on LiteRT and iOS on Core AI. It is not affiliated with Google.
 
 | Directory | What it holds |
@@ -57,7 +57,7 @@ The model folder is
 [mlboydaisuke/EmbeddingGemma-2-Transcribe-CoreAI](https://huggingface.co/mlboydaisuke/EmbeddingGemma-2-Transcribe-CoreAI):
 `pipeline.json`, `reader_config.json`, `vocab.txt`, `mel_filters.bin`, and the bundles in `macos/` (the Mac), `ios/`
 (any iPhone; the phone specializes them when it loads them) and `ios-h19p/` (compiled ahead of time for the iPhone 18
-Pro). The conversion, its checks and every number below are on the
+Pro). The conversion, its checks and every number in the table below are on the
 [zoo card](https://github.com/john-rocky/coreai-model-zoo/tree/main/models/embeddinggemma-2-transcribe).
 
 For running the encoder alone on long audio on a Mac, the same repo also holds a second form of the encoder in
